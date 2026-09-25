@@ -12,6 +12,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument("--source", default=".")
 parser.add_argument("--output", required=True)
+parser.add_argument("--trace", action="store_true", help="also write the run file run_goal writes")
 args = parser.parse_args()
 source = Path(args.source).resolve()
 sys.path.insert(0, str(source))
@@ -39,7 +40,8 @@ def timed(method, *positional, **kwargs):
 
 
 browser_module.cdp = timed
-agent = Agent(URL, GOALS)
+# Older sources (--source) predate trace_path, so pass it only when tracing.
+agent = Agent(URL, GOALS, **({"trace_path": folder / "run.json"} if args.trace else {}))
 # Setup is excluded in both arms, as in the original demo.
 calls.clear()
 error = None

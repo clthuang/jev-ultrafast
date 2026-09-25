@@ -13,6 +13,10 @@ HTML = """<!doctype html><title>Guard checks</title>
 <select aria-label="Category"><option>All</option><option>Design</option></select>
 <p id="outside">Unrelated offscreen text</p>"""
 
+DIALOG_AND_POPUP = """<!doctype html><title>Dialog and pop-up checks</title>
+<button onclick="window.answer=confirm('Sure?')">Confirm</button>
+<a href="about:blank" target="_blank">Open</a>"""
+
 
 def main():
     browser = Browser("data:text/html," + quote(HTML))
@@ -127,6 +131,27 @@ def main():
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")
+
+        browser.close()
+        browser = Browser("data:text/html," + quote(DIALOG_AND_POPUP))
+        page = browser.observe(screenshot=False)
+        confirm = next(a for a in page["actions"] if a["label"] == "Confirm")
+        try:
+            browser.act(confirm, page)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("An open dialog should block the click")
+        assert browser.dismiss_dialog()
+        page = browser.observe(screenshot=False)
+        assert browser.evaluate("window.answer") is False
+        passed.append("dialog dismissed without accepting")
+
+        link = next(a for a in page["actions"] if a["label"] == "Open")
+        browser.act(link, page)
+        assert browser.close_popups() == ["about:blank"]
+        assert browser.close_popups() == []
+        passed.append("pop-up tab closed and reported")
     finally:
         browser.close()
     print("\n".join(passed))

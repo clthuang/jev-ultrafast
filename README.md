@@ -10,7 +10,7 @@
 
 Give it one goal. [TypeSafe's Jev](https://docs.typesafe.ai/introduction) picks an operation and an element. A small LLM writes text only when the operation is `TYPE_TEXT`.
 
-**Zürich → London on Google Flights in 7.1 seconds.** One natural-language goal, actual text generation, and loading waits included.
+**Zürich → London on Google Flights in 7.1 seconds** in the recorded run (commit `452c1ad`). One natural-language goal, actual text generation, and loading waits included.
 
 <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="A real Google Flights search at 1× speed, with generated city names and dynamic operation/target decisions" width="100%" /></a>
 
@@ -32,21 +32,22 @@ The operations are `CLICK`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `
 
 ```text
                       one TypeSafe request
-                     ┌───────────────────────────┐
-page → element table → operation                 │
-                     │ click_target              │
-                     │ type_text_target          │
-                     │ select_target, if present │
-                     └─────────────┬─────────────┘
+                     ┌─────────────────────────────────┐
+page → element table → operation                       │
+                     │ click_target                    │
+                     │ type_text_target                │
+                     │ select_target, if present       │
+                     │ commit, per click/select target │
+                     └─────────────┬───────────────────┘
                          use the matching target
                                    │
-                    CLICK [7] ─────┤──→ browser
+                    CLICK [7] ─────┤──→ commit? stop : browser
                 TYPE_TEXT [3] ─────┘
                           ↓
                    small LLM → text → browser
 ```
 
-Target questions are speculative. If the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**. Each target head contains only compatible elements. Native dropdown choices carry an observed element/option index.
+Target questions are speculative. If the operation is `CLICK`, only `click_target` can execute. A yes/no commit question per click or dropdown target asks whether it would pay, buy, book, send, delete, or change account settings. Only the chosen target's answer is read, and a likely commit stops before input unless the caller passed `allow_commit`. Three decisions, **one network round trip**. Each target head contains only compatible elements. Native dropdown choices carry an observed element/option index.
 
 There are no site-specific action scripts or prepared field strings in the policy. The Flights example supplies a goal and independently verifies the outcome. The screenshot renderer adds labels afterward; it does not drive the browser.
 
@@ -63,25 +64,28 @@ uv run jev
 
 Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. The inspector shows numbered elements, operation probabilities, target probabilities, and executed actions. **Choose next** pauses before execution.
 
-Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
+Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted. Each run works in its own Chrome window, opened without taking keyboard focus, so you can watch it; `JEV_BACKGROUND_TAB=1` in `.env` uses a hidden tab in your current window instead.
 
 `TEXT_MODEL_API_KEY` is an OpenRouter key in the example configuration. The current demo uses `inception/mercury-2.5` with reasoning disabled. Gemini, GLM, and DeepSeek can also use the OpenAI-compatible text helper; configure the appropriate model, endpoint, and reasoning setting.
 
 ## Use the library
 
 ```python
+from datetime import date, timedelta
+
 from jev_ultrafast import Agent
 
+departure = date.today() + timedelta(weeks=4)
 with Agent(
     "https://www.google.com/travel/flights?hl=en",
-    "Find one-way flights from Zurich to London on September 20, 2026, "
+    f"Find one-way flights from Zurich to London on {departure:%B} {departure.day}, {departure.year}, "
     "for one adult in economy. Stop when matching flight options are visible.",
 ) as agent:
     for state in agent.run():
         print(state["elapsed_ms"], state["status"])
 ```
 
-Run with `uv run --env-file .env python your_script.py`. The same policy can run a different task:
+Run with `uv run --env-file .env python your_script.py`. Every run, including the inspector's, stops before input on a site other than its start site unless `allowed_sites` names it. The same policy can run a different task:
 
 ```bash
 uv run --env-file .env python examples/run.py \
@@ -90,6 +94,14 @@ uv run --env-file .env python examples/run.py \
 ```
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
+
+## Use from Claude Code
+
+```bash
+claude mcp add jev-ultrafast --scope user -- uv run --directory /path/to/jev-ultrafast jev-mcp
+```
+
+Claude delegates a bounded browser sub-goal with `run_goal`, checks the returned page and screenshot, and labels the run with `report_outcome`. The executor stops before a likely payment, booking, message, deletion, or account change unless Claude passes `allow_commit`. Each run is saved to `artifacts/runs/`; `uv run python scripts/report_runs.py` summarizes them.
 
 ## Why it moves
 
@@ -114,16 +126,19 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
+| [mcp_server.py](jev_ultrafast/mcp_server.py) | Claude Code tools: `run_goal` and `report_outcome` |
 
 ## Evidence and limits
 
-The current video is a **7,073 ms** Google Flights run. Timing starts after initial page observation and includes model calls, generated text, browser work, stale decisions, and loading waits. A fresh independent check verifies the one-way setting, Zürich, London, September 20, 2026, and visible flight options. The video plays at 1×, with no opening hold and a 0.5-second final hold.
+The current video is a **7,073 ms** Google Flights run, recorded at commit `452c1ad`, before the Claude Code changes. Timing starts after initial page observation and includes model calls, generated text, browser work, stale decisions, and loading waits. A fresh independent check verifies the one-way setting, Zürich, London, September 20, 2026, and visible flight options. The video plays at 1×, with no opening hold and a 0.5-second final hold.
 
 In six alternating runs with identical models and settings, both versions passed **3/3**. Median task time went from **9.450 s → 7.092 s**, a **25% reduction**; median browser protocol calls went from **1,092 → 101**. This is three repeats of one task on one browser profile, not a general reliability benchmark.
 
-The same policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
+At that commit, the policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
 
-A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
+On 2026-09-24, after the Claude Code changes, six re-measured runs all passed but took 64–185 s. TypeSafe was slow that day: even one-question requests took a median 4.4 s, against 178 ms per decision in the recording. The per-target commit questions add 82% more input tokens per request; their latency effect was not resolved. The dated note in performance.md has the details.
+
+A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP; `run_goal` closes and reports pop-up tabs instead of following them, and dismisses JavaScript dialogs without accepting them. A pop-up still brings Chrome to the front before it is closed. Owned tabs share the existing Chrome profile.
 
 ## Development
 
