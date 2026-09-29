@@ -5,7 +5,7 @@
 - **Round 1** (§1, §2): seven hypotheses, registered on 2026-09-24 at 12:52, before any experiment ran. All ran
   12:55–13:25 the same day.
   - **Verified:** only H5, re-reading after a read timeout, and only on a synthetic busy page.
-  - **Its design:** §2, with its implementation plan in `docs/executor-improvements-plan.md`.
+  - **Its design:** §2.
 - **Round 2** (§3): waiting for a page to load. Each hypothesis was registered before its trials:
   - **H8,** a wait after every input: not verified;
   - **H8b,** a wait before a DONE or BLOCKED answer stands, with a 500 ms minimum: verified, for DONE answers from a
@@ -13,8 +13,14 @@
   - **H8c,** after the user's review, that wait at every final answer with no minimum: not verified. It failed only on
     YouTube, where the results rule could not see results that had loaded;
   - **H8d,** YouTube again, in a taller view: verified.
-- **Round 2's design:** §4 v4.1, for the user's review. It drops the minimum and waits at every final answer, by a rule
-  H8d registered after H8c's result.
+- **Round 2's design:** §4 v4.2, approved on your behalf on 2026-09-29 (plan P25). It drops the minimum and waits at
+  every final answer, by a rule H8d registered after H8c's result.
+- **The plan:** `docs/executor-improvements-plan.md` builds §2 and §4 together, as one page-readiness protocol
+  (§4.1), with the failure-review follow-ups.
+- **The first automatic review** (2026-09-29, `docs/failure-review.md`) proposed two changes:
+  - **waiting for results before DONE:** §4's own, from two runs it flagged (§4.2);
+  - **reading controls below the fold and inside shadow DOM:** H1 and H4 again. Both were partly verified, and every
+    fix tried failed (§1, Results), so it is held until a new fix idea (plan P32).
 
 **Where the problem is:** in the Phase 10 comparison (`docs/performance.md`), 7 of 30 executor sessions needed more than one `run_goal`. They took 57% of all executor session time (951 of 1,680 s), and they include all 4 goals where Claude in Chrome was faster. Jev's own loop was a median 4.0 s of a 32.1 s session.
 
@@ -229,14 +235,21 @@
   - **Broken variants:** every one it ran against the tests failed at least one test, except one that behaves identically to the design.
 - **Cycle 3:** one reviewer checked the cycle-2 fixes and dry-ran the plan's checks against a build of this design. It found the design ready, apart from the hung-daemon timing in §2.4, now fixed. Its plan findings, including one blocker in the lab shutdown, went into the plan.
 - **This version** applies the fixes from both cycles.
+- **Cycle 4, on 2026-09-29 (v2):** one reviewer checked §2 and §4 against commit `8953b45`
+  (`artifacts/page-readiness-implementation/review-design.md`). Its S6 cut the dialog check:
+  - **Why:** no registered criterion needs it, no recorded run met the case (0 of 76), and the daemon's single dialog
+    record includes your own tabs, so a dialog left open in any of them would turn the repeat off.
+  - **What goes:** the private `_send` import, D2 and D3, test 7, live checks 10 and 11, and the plan's close fallback.
+  - **What it costs:** a dialog after a step stops the run about 10 s later, and a stop between the repeats leaves it
+    open (§2.8).
 
 **Decisions made on your behalf.** Each has a comment where it lives in the code, naming this section, so it can be changed there.
 
 | # | Decision | Why | Where to change it |
 | --- | --- | --- | --- |
 | D1 | Repeat a timed-out read at most **2** times | The registered cap. H5's test needed one repeat; only offline test 2 (§2.5) covers giving up. A page that stays busy now stops after about 15 s instead of 5 s | `READ_TIMEOUT_REPEATS` in `jev_ultrafast/agent.py` |
-| D2 | When the dialog check cannot answer, **treat it as a dialog** | Fails closed: the run then stops as it does today | the `except` branch of `Browser.dialog_open()` in `jev_ultrafast/browser.py` |
-| D3 | Ask the daemon through browser-harness's **private `_send`**, not the public `page_info()` | See "Why a dialog check, and why `_send`" in §2.3 | the import in `jev_ultrafast/browser.py`; recheck on any browser-harness upgrade (pinned `==0.1.13`) |
+| D2 | **Withdrawn in v2:** there is no dialog check to fail closed | Cycle 4's S6 cut the check | — |
+| D3 | **Withdrawn in v2:** nothing asks the daemon about dialogs | Cycle 4's S6 cut the check | — |
 | D4 | The repeat covers the read after **every executed step**: click, fill, select, scroll and wait | They all share the one read, and repeating a read is harmless after any of them. The registered fix says "after an executed input", and H5's test exercised a click only | the comment above the loop in `Agent.command("act")` |
 | D5 | Count repeats as `repeated_reads`, in the run file and in `scripts/report_runs.py`. Claude's result text does not change | It is the only sign that the fix ever fires outside the test page. The prototype had no counter; it changes no behaviour | `_fresh_state` in `agent.py`; the `totals` in `report_runs.py`; `render()` in `mcp_server.py`, if Claude should see it |
 
@@ -246,18 +259,19 @@
 - **A busy page times that read out:** the read is a `Runtime.evaluate`. When the page's main thread stays busy past browser-harness's 5 s IPC wait, `cdp()` raises `_IPCResponseTimeout`, a `TimeoutError`.
 - **Nothing catches it before the server:**
   - **The tick:** `command("tick")` catches only `StalePage`.
-  - **The server:** `start_run` (`mcp_server.py` lines 165–166) asks `dismissed()`, which finds no dialog.
+  - **The server:** `start_run` (`mcp_server.py` lines 175–176 at `8953b45`) asks `dismissed()`, which finds no dialog.
   - **The result:** the run ends `stopped` with the timeout's text, although its input succeeded.
 
 ### 2.2 The change
 
-After an executed step, when the read raises `TimeoutError` and no JavaScript dialog is recorded, the agent reads again: at most 2 more times, with the run's stop check before each repeat.
+After an executed step, when the read raises `TimeoutError`, the agent reads again: at most 2 more times, with the
+run's stop check before each repeat. A JavaScript dialog also times reads out, so it now stops the run once the
+repeats run out, about 10 s later than before (§2.4, §2.8).
 
 **Why this fits the loop:**
 
 - **Same split of responsibilities:**
   - **The agent owns observation retries:** its tick already reads again after a stale choice (`agent.py` lines 114–118).
-  - **The browser owns daemon details:** `dialog_open()` sits beside `dismiss_dialog()`.
   - **The server owns stop notes:** they are unchanged.
 - **Same invariants:**
   - **No input repeats:** the loop wraps only the read, which runs after the step is logged and saved. "Never retry a browser mutation. Log execution before observing its result." both still hold.
@@ -269,8 +283,8 @@ After an executed step, when the read raises `TimeoutError` and no JavaScript di
 `jev_ultrafast/agent.py`: a module constant, a counter, and a loop around the read at line 235. Every line below passes `ruff check` at its real indentation; the longest is 118 characters.
 
 ```python
-# Delegated decision D1 (docs/executor-improvements.md §2): after an executed step, a read that times out with no
-# dialog open is repeated at most this many times, each adding up to 5 s. H5's test needed one repeat.
+# Delegated decision D1 (docs/executor-improvements.md §2): after an executed step, a read that times out is repeated
+# at most this many times, each adding up to 5 s. H5's test needed one repeat.
 READ_TIMEOUT_REPEATS = 2
 ```
 
@@ -286,17 +300,18 @@ READ_TIMEOUT_REPEATS = 2
                     state["page"] = state["browser"].observe(screenshot=self.screenshots)
                     break
                 except TimeoutError:
-                    if read == READ_TIMEOUT_REPEATS or state["browser"].dialog_open():
-                        raise  # out of repeats, or a dialog, which blocks every read: stop as before
+                    if read == READ_TIMEOUT_REPEATS:
+                        raise  # out of repeats: stop as before; start_run then dismisses any dialog
                     if self.before_input:
                         self.before_input()  # the run's budget, cancellation and shutdown also bound the repeats
                     state["repeated_reads"] += 1
 ```
 
-- **Order matters:** the dialog check comes before the stop check. With a dialog open, the loop re-raises the `TimeoutError` at once, and `start_run` dismisses the dialog. A stop raised first would end the run without dismissing it:
-  - **Budget and shutdown:** they reach `start_run`'s `except Exception` branch.
-  - **Esc:** it arrives as `asyncio.CancelledError`, which has a branch of its own.
-  - **Neither branch** calls `dismissed()`.
+- **A dialog times out every read:** the repeats run out, then `start_run` finds the dialog and dismisses it, with
+  today's note, about 10 s later. A stop between the repeats ends the run without dismissing it, since neither
+  `start_run`'s `except Exception` branch, for the budget and a shutdown, nor its `asyncio.CancelledError` branch, for
+  Esc, calls `dismissed()`. The dialog then stays until the tab closes, or until the next goal in that tab stops once
+  with "the page showed a dialog; dismissed" (§2.8).
 - **Only a timeout repeats:** a `StalePage` from the read propagates as today, and the tick reads again.
 - **The counter counts repeats made:** a stop check that ends the run before a repeat adds nothing.
 - **`scripts/report_runs.py`** adds one key to `totals`, after `"stale decisions"`:
@@ -306,61 +321,18 @@ READ_TIMEOUT_REPEATS = 2
   It uses `.get` because run files from before this change have no such key, and `main()` skips any file whose facts raise.
 - **`__init__`'s comment** becomes `# optional stop check before text calls, inputs and read repeats; raising skips them`.
 
-`jev_ultrafast/browser.py`: the import, and a method beside `dismiss_dialog()`.
-
-```python
-# _ipc and _send are private browser-harness names; the version is pinned. _send is decision D3
-# (docs/executor-improvements.md §2): it asks the daemon alone, where page_info() would run code in the
-# daemon's own tab. Recheck both on any browser-harness upgrade.
-from browser_harness import _ipc as ipc
-from browser_harness.admin import NAME, daemon_browser_kind, ensure_daemon, restart_daemon
-from browser_harness.helpers import _send, cdp
-```
-
-- **Where the comment goes:** above the whole `browser_harness` import group. Placed between two of its imports, it fails ruff's import-order rule (I001). The full intended `browser.py` passes `ruff check`.
-
-```python
-    def dialog_open(self):
-        """Whether a JavaScript dialog is open, from the daemon's record of Page dialog events. Dismisses nothing."""
-        try:
-            # ponytail: the daemon keeps one dialog record for all its sessions; a dialog in another tab counts too.
-            return _send({"meta": "pending_dialog"})["dialog"] is not None  # a reply without the key raises
-        except Exception:
-            return True  # unknown counts as open: the run stops as before (D2, docs/executor-improvements.md §2)
-```
-
-**Why a dialog check, and why `_send`:**
-
-- **What the check buys:** no registered criterion needs it. Without it, a dialog after a step still ends with "the page showed a dialog; dismissed", but only after all 3 reads time out, about 10 s later. And a budget or Esc stop between the repeats would leave the dialog open. It is part of the verified prototype, so it stays.
-- **`page_info()` runs code in a tab the run does not own:**
-  - **How:** in browser-harness 0.1.13 it asks the daemon for `pending_dialog` first. When none is recorded, it then evaluates the URL and title with no session (`helpers.py` `_runtime_evaluate`).
-  - **Where that lands:** the daemon runs a request without a session in its own default tab (`daemon.py` line 767), the tab it attached to at start. In the owner's Chrome, that is one of the owner's tabs, not the run's tab.
-  - **Why that matters:** the owner's tab would then decide how fast the check answers. A busy owner tab adds up to 5 s and makes `page_info()` raise, which would count as a dialog.
-- **`_send` asks the daemon alone:**
-  - **What it is:** `_send({"meta": "pending_dialog"})` is the first line of `page_info()` on its own. It touches no tab.
-  - **Where the answer comes from:** the daemon answers from its record of `Page.javascriptDialogOpening` and `Page.javascriptDialogClosed` (`daemon.py` lines 628–631 and 739), without the page.
-  - **How fast:** 0–1 ms in H5's trials, while the page was blocked.
-  - **Why `["dialog"]` and not `.get()`:** the daemon always sends the key. A reply without it means the daemon closed the connection, and then `_send` returns `{}`.
-- **Private, and what breaks it:**
-  - **Precedent:** `browser.py` already imports browser-harness's private `_ipc` module for `foreign_browser_port()`. The version is pinned at `==0.1.13`.
-  - **A rename or removal:** importing `jev_ultrafast` fails at once, so every test fails.
-  - **A changed reply:** anything without a `dialog` key counts as a dialog, so runs stop as they do today.
-  - **A hung daemon:** the check waits up to browser-harness's own 5 s, then counts as a dialog.
-- **The events need `Page.enable`:** the daemon hears dialog events only on sessions with Page enabled. `Browser.__init__` already enables it for `Page.handleJavaScriptDialog`.
-- **One record for every tab:**
-  - **What it covers:** the daemon keeps a single record for all its sessions, including the owner's own tab the default daemon attaches to (`daemon.py` lines 508–522).
-  - **If another tab has a dialog:** a dialog left open there makes the check answer "open", so a timed-out read stops as today.
-  - **Unknown:** whether a tab closed with its dialog still open leaves the record set. Live check 11 in §2.5 tests it.
+`jev_ultrafast/browser.py`: unchanged in v2. v1's dialog check, `Browser.dialog_open()` asking the daemon through
+browser-harness's private `_send`, is cut (cycle 4); §2.8 keeps it among the alternatives.
 
 ### 2.4 Behaviour
 
 | After an executed step | Today | With the change |
 | --- | --- | --- |
 | The page is busy for more than 5 s, then answers | `stopped` after about 5 s: "Runtime.evaluate timed out after 5s waiting for the daemon" | The read is repeated; the step records the new page and the run goes on |
-| The page stays busy through all 3 reads | `stopped` after about 5 s. `finish()`'s own read then waits up to 5 s more | `stopped` after about 15 s, with the same note and the same `finish()` read |
-| A JavaScript dialog opens after the input returns, for example on the next page | `stopped` after about 5 s: "the page showed a dialog; dismissed" | The same, plus 0–1 ms for the check. A dialog opened by the click itself times out the input, before this loop, as today |
-| The daemon records a dialog in another tab, the check fails, or the daemon hangs | `stopped` after about 5 s, with the timeout note; about 10 s with a hung daemon, whose dismissal call also waits 5 s | The same. A hung daemon adds up to 5 s more for the check |
-| The 90 s budget, a cancellation or a shutdown arrives during the repeats | Not applicable | The run stops with that reason before the next repeat. On shutdown the server exits `SHUTDOWN_WAIT_SECONDS` (5 s) after the signal. On a page still busy, that is usually before `finish()` saves the note. The step itself was saved before the read |
+| The page stays busy through all 3 reads | `stopped` after about 5 s. `finish()`'s own read then waits up to 5 s more | `stopped` after about 15 s, with the same note and the same `finish()` read. The failure code is still `busy_after_step`, since the step's `page_changed` stays None |
+| A JavaScript dialog opens after the input returns, for example on the next page | `stopped` after about 5 s: "the page showed a dialog; dismissed" | The same note, after about 15 s: each read times out while the dialog is open, then `start_run` dismisses it. `repeated_reads` is 2. A dialog opened by the click itself times out the input, before this loop, as today |
+| The daemon hangs | `stopped` after about 10 s, with the timeout note: the read, then the dismissal call, each wait 5 s | `stopped` after about 20 s: three reads, then the dismissal call |
+| The 90 s budget, a cancellation or a shutdown arrives during the repeats | Not applicable | The run stops with that reason before the next repeat, with no failure code, where today the same page ends `busy_after_step`. On shutdown the server exits `SHUTDOWN_WAIT_SECONDS` (5 s) after the signal. On a page still busy, that is usually before `finish()` saves the note. The step itself was saved before the read |
 | A repeated read finds the page navigating (`StalePage`) | Not applicable | As a stale read after a step today: the tick reads again, and the run goes on |
 | A read after a step returns a blank page, as `finish()`'s read did in run 7782 | The step records the blank page | The same; §2.7 |
 
@@ -369,30 +341,24 @@ from browser_harness.helpers import _send, cdp
 **Offline** (no browser, no model):
 
 - **A click in every test:** the fixture's default decision is a fill, which would call the text model, so every test sets a click with the file's `act(runner)` helper.
-- **`dialog_open` defaults to False:** the `runner` fixture's browser is a `Mock`, whose unset methods return a truthy `Mock`. The fixture therefore gains `dialog_open=Mock(return_value=False)`, and test 3 overrides it.
 
 In `tests/test_agent.py`:
 
 1. **`test_timed_out_read_after_a_step_is_repeated`:**
-   - **Setup:** `observe` raises `TimeoutError` once, then returns a second page with its own URL (`https://example.test/results`) and fingerprint; `dialog_open` returns False.
+   - **Setup:** `observe` raises `TimeoutError` once, then returns a second page with its own URL (`https://example.test/results`) and fingerprint.
    - **Expect:** one `act` and two `observe` calls. The step's `url` and `page_changed` come from the second page, `repeated_reads` is 1, and the status is `ready`.
 2. **`test_timed_out_reads_stop_after_the_last_repeat`:**
    - **Setup:** `observe` always raises `TimeoutError`.
-   - **Expect:** `TimeoutError`, with `loop.READ_TIMEOUT_REPEATS + 1` `observe` calls, `loop.READ_TIMEOUT_REPEATS` `dialog_open` calls, and one `act`. `repeated_reads` equals the cap, and the step is logged with `page_changed` None.
-3. **`test_open_dialog_stops_a_timed_out_read_at_once`:**
-   - **Setup:** `observe` raises `TimeoutError`, `dialog_open` returns True, and `before_input` is a `Mock()`.
-   - **Expect:** `TimeoutError` after one `observe`. `before_input` has one call, the one before the input, so the dialog check ran before the stop check. `repeated_reads` is 0.
+   - **Expect:** `TimeoutError`, with `loop.READ_TIMEOUT_REPEATS + 1` `observe` calls and one `act`. `repeated_reads` equals the cap, and the step is logged with `page_changed` None.
+3. **Cut in v2,** with the dialog check it tested.
 4. **`test_stop_check_runs_before_each_repeated_read`:**
    - **Setup:** `before_input` is `Mock(side_effect=[None, ValueError("90 s budget reached")])`, and `observe` times out once.
    - **Expect:** `ValueError` matching "90 s budget reached", one `observe`, one `act`, and `repeated_reads` 0.
 5. **`test_only_a_timed_out_read_is_repeated`:**
    - **Setup:** `observe` raises `StalePage` once.
-   - **Expect:** `StalePage`, one `observe`, no `dialog_open` call, and `repeated_reads` 0.
+   - **Expect:** `StalePage`, one `observe`, and `repeated_reads` 0.
 6. **`test_new_goal_resets_every_counter`:** extended with `repeated_reads`.
-7. **`test_dialog_open_asks_only_the_daemon`** (parametrized):
-   - **Patches:** `_send` and `cdp` in `jev_ultrafast.browser`, and also `_send` and `cdp` in `browser_harness.helpers`. A regression to `page_info()` would otherwise reach the owner's live daemon during `pytest`.
-   - **Answers:** `{"dialog": {"type": "alert"}}` gives True, `{"dialog": None}` gives False, and both `{}` and a raised error give True.
-   - **Requests:** `jev_ultrafast.browser._send` is called once with `{"meta": "pending_dialog"}`. The other three are not called.
+7. **Cut in v2,** with the dialog check it tested.
 
 In the other test files:
 
@@ -401,39 +367,13 @@ In the other test files:
    - **Setup:**
      - **Jev's stand-in:** answers CLICK "Search", then DONE.
      - **The timeout, once:** the first read after the click raises `TimeoutError`, and later reads behave as `FakeBrowser.observe` does now. `FakeBrowser.read_error` stays set once set, so the test wraps `observe` with a one-shot error instead.
-     - **`FakeBrowser.dialog_open()`:** returns `self.dialog`.
    - **Expect:**
      - **The result:** it says `done`.
      - **The run file:** one step with `page_changed` not None, and `repeated_reads` 1. It is not True, because the fake page's fingerprint never changes.
      - **The input:** `act` has one call.
 9. **`test_report_counts_false_and_missed_done`** (`tests/test_report_runs.py`): extended. One run gets `repeated_reads=2`, and the others have no such key, like run files from before the change. The report then contains "repeated reads 2".
 
-**Live, no model** (`scripts/check_guards.py`, `data:` pages only):
-
-- **Where it runs:** first in the lab Chrome of the acceptance step, then in the owner's Chrome.
-- **Order:** check 10 extends the existing dialog check where it is. Check 11 goes last, after the pop-up check.
-- **If check 11 fails in the lab:** a closed tab left the daemon's dialog record set. The check's own clean-up resets it. The fallback is then that `Browser.close()` dismisses any dialog before closing its tab; the plan applies it and runs the check again. The script runs in the owner's Chrome only after the lab run passes.
-
-10. **Dialog check:** on the existing `confirm()` page, after the click times out:
-    - **While open:** `dialog_open()` is True.
-    - **Nothing dismissed:** `dismiss_dialog()` still returns True.
-    - **Cleared:** after the existing `observe()` that follows, `dialog_open()` is False. The daemon has recorded the close by then, since it handles events in order.
-    - **Appended after** the existing line "dialog dismissed without accepting".
-    - **Appends:** "dialog check sees a dialog and leaves it open".
-11. **Busy page, then a closed tab:**
-    - **The busy button:** `DIALOG_AND_POPUP` gains `<button onclick="setTimeout(()=>{const end=Date.now()+7000;while(Date.now()<end);})">Busy</button>`, clicked with `browser.act`.
-    - **Why the order is fixed:** the first `observe()` after an input awaits two animation frames or 50 ms. It cannot finish before a 0 ms timer queued by the click.
-    - **Expect:**
-      - **The read:** `observe()` raises `TimeoutError`.
-      - **The check:** `dialog_open()` returns False within 1 s.
-      - **After the block:** the next `observe()` succeeds, about 2 s later.
-    - **Then a closed tab:** a second `Browser` opens the same page and clicks Confirm; the click times out as in check 10. It is closed with the dialog still open. Within 3 s, polling every 0.1 s, `dialog_open()` must turn False. Chrome can send the dialog's close event after `Target.closeTarget` answers.
-    - **The check must not leave a stuck record:**
-      - **The second `Browser`** closes in its own `try/finally`.
-      - **If the record is still set** at the end, a `finally` opens a `confirm()` in the first tab and dismisses it. Its close event resets the daemon's single record.
-      - **`main()`'s `finally`** calls `dismiss_dialog()` before `close()`, in case an assert fails while check 10's `confirm()` is open.
-    - **Appends:** "a busy page's read times out; the dialog check answers without the page" and "a tab closed with its dialog open leaves no dialog record".
-    - **Cost:** about 12–13 s more per run of the script: the 7 s block, and the second `confirm()` click's 5 s timeout.
+**Live checks 10 and 11:** cut in v2, with the dialog check they tested. §4.6's live check stays.
 
 **Acceptance, once, no model, in a lab Chrome:**
 
@@ -445,14 +385,13 @@ In the other test files:
   - **The browser:** a lab Chrome with a fresh profile. The owner's Chrome has 1Password, whose menu can cover the fixture's field, which would test 1Password (H6) rather than the repeat.
 - **Pass:**
   - **Busy page:** 5 of 5 trials end `done`, with each input once, one submission at the server, and `repeated_reads` 1.
-  - **Alert:** the trial ends `stopped` with "the page showed a dialog; dismissed" and `repeated_reads` 0.
+  - **Alert:** the trial ends `stopped` with "the page showed a dialog; dismissed" and `repeated_reads` 2 (v2).
 
 ### 2.6 Docs and comments
 
 - **`docs/claude-code-integration.md`:**
   - **The §6.2 code sketch:** the `check_cancelled()` comment `# also runs before each input, via agent.before_input` becomes `# also runs before each input and each repeated read, via agent.before_input`.
-  - **"Dialogs":** add that after a step, a read that times out with no dialog recorded is repeated first, up to 2 times.
-  - **"Shared daemon side effects":** add the reverse direction. A dialog open in another tab of the same daemon makes `dialog_open()` True, so a timed-out read is not repeated.
+  - **"Dialogs":** add that after a step, a read that times out is repeated first, up to 2 times, so a dialog stops the run about 10 s later than before.
   - **"Deadline, cancellation and shutdown":** add "and before each repeated read".
   - **The Speed row of the metrics table:** add "repeated reads (reads after a step that timed out and were taken again)".
 - **Comments in `jev_ultrafast/mcp_server.py`:**
@@ -491,10 +430,13 @@ In the other test files:
   - **One repeat only,** with no stop check before it.
   - **No dialog test:** a dialog would first cost a second 5 s timeout.
   - **Not the verified shape.**
-- **No dialog check:**
-  - **Simpler:** no private import.
-  - **Slower dialog stops:** a dialog would stop the run about 10 s later.
-  - **A dialog could stay open:** a budget or Esc stop between the repeats would end the run without dismissing it.
+- **A dialog check** (v1, cut in v2): before each repeat, ask the daemon through browser-harness's private `_send`
+  whether a dialog is open, and stop at once if so.
+  - **What it bought:** dialog stops about 10 s sooner, and no dialog left open by a stop between the repeats.
+  - **Why it was cut:** no registered criterion needs it, no recorded run met the case (0 of 76), and the daemon's
+    single dialog record includes your own tabs, so a dialog left open in any of them would turn the repeat off. It also
+    cost a private import, a five-case test and two live checks, one of which could leave the daemon's record stuck.
+  - **Where it is:** this section at commit `8953b45`.
 
 ## 3. Round 2: page loading (H8)
 
@@ -1354,10 +1296,10 @@ The series ran 19:02:06–19:04:29 on the same Chrome 154.0.8037.57.
 
 ## 4. Design: wait for loading before a final answer (H8b to H8d)
 
-**Status:** v4.1, proposed for the user's review. Nothing is implemented. v4 drops v3's 500 ms minimum wait, and
-waits at every final answer, not once per input (D9). It follows the user's rule (§4.1), and a rule H8d registered
-after H8c's result (§3). v4.1 is the code H8c and H8d ran (v4), plus two fixes from its
-review (§4.6).
+**Status:** v4.2, approved on your behalf on 2026-09-29 (plan P25 in `docs/executor-improvements-plan.md`). Nothing is
+implemented. v4 drops v3's 500 ms minimum wait, and waits at every final answer, not once per input (D9). It follows
+the user's rule (§4.1), and a rule H8d registered after H8c's result (§3). v4.1 is the code H8c and H8d ran (v4),
+plus two fixes from its review (§4.6). v4.2 adds one guard to v4.1's code, and three tests (§4.6).
 
 **Scope:** the loading gate H8b verified, without its minimum wait, as H8c and H8d tested it (§3).
 
@@ -1366,8 +1308,8 @@ review (§4.6).
 - **What it rests on:**
   - **H8c's registered verdict is not verified,** and its registration kept the minimum on that result. Its test 2
     failed on YouTube, where the results rule could not see results that had loaded.
-  - **H8d's registration,** written after H8c's results, replaced that consequence. With H8d verified, the design drops
-    the minimum on:
+  - **H8d's registration,** written after H8c's results, replaced that consequence: had H8d failed its criterion, the
+    design would have kept the minimum (`registration-h8d.md`). With H8d verified, the design drops the minimum on:
     - H8c's tests 1 and 3;
     - H8c's test 2 on the four other sites;
     - H8d on YouTube;
@@ -1380,6 +1322,9 @@ review (§4.6).
 - **What it does not cover:** BLOCKED answers take the same code path, but no trial had one. Keeping them is the
   user's decision (D6).
 - **With §2:** together with H5's repeated read, it makes up the executor's page-readiness protocol (§4.1).
+- **The first automatic review's proposal** (2026-09-29) asked to wait for results before DONE, by polling the page
+  read until it is stable. That is H3's wait for the DOM to go quiet, which failed (§4.8); this wait follows the
+  requests instead.
 - **Out of scope:** §4.7 lists what stays out.
 
 **Review:**
@@ -1434,20 +1379,33 @@ review (§4.6).
       - five re-anchored variants, not four;
       - "no guarantee" evidence that belonged to a carried request, so §4.7's risk is now marked as inferred, not
         observed.
+- **v4.2, on 2026-09-29:** an independent review against commit `8953b45`, the code built since, and calvin in report
+  mode over both halves.
+  - **The review:** approve with fixes, with no blocker, 7 should-fix and 5 nits
+    (`artifacts/page-readiness-implementation/review-design.md`). All are applied here, and its S6 cut §2's dialog
+    check.
+  - **Calvin's 24 questions:** answered in `artifacts/page-readiness-implementation/calvin-design-close.md`.
+  - **The code is v4.1's, plus one guard:** `observe()` drains only once tracking has started (N1). The diff was
+    rechecked at `8953b45` (§4.6).
+  - **Three tests added:** 25 and 26, for the two rows of §4.5 no test covered, and 27, for the guard.
+  - **The text clarified:** how a failed drain ends a read, what "sent" measures, the one margin code adds, and how
+    §2's repeats meet the wait's cap.
 
-**Decisions made on your behalf.** Each has a comment where it lives in the code, naming this section, so it can be
-changed there. Numbering continues from §2's D1–D5.
+**Decisions made on your behalf.** Each has a comment where it lives in the code, so it can be changed there. The
+comments for D6, D7 and D8, D10 and D12 name this section; those for D9, D11, D13 and D14 name their number, on the
+lines they govern (§4.4). Numbering continues from §2's D1–D5.
 
 | # | Decision | Why | Where to change it |
 | --- | --- | --- | --- |
 | D6 | Wait only when Jev answers **DONE or BLOCKED**, not after every input | A wait after every input (H8) failed on Google Flights: in H8b's trials, the page's first request was seen 194–422 ms after the click, long after H8's wait had ended. A final answer is also the one decision a later step cannot undo. BLOCKED is included untested, by the user's decision (2026-09-25); it takes the same path | the `if selected in {"DONE", "BLOCKED"}` branch of `Agent.command("act")` |
-| D7 | Wait while a content request is in flight, until **100 ms** of quiet, and stops polling **5 s** after the last input. **No minimum wait** | The user's rule (§4.1): code waits only while it sees loading. H8b's 500 ms minimum was a timing margin, not a signal. Without it, H8c's and H8d's gate caught every false DONE. On Google Flights, a request carried from before the click (D13) held 6 of the gate's 10 first answers, and the freshness check caught the 2 that saw no loading. The replays' median wait fell from 195 ms to 0 ms (§3). §4.7 has the risk that remains. 100 ms of quiet matched 500 ms on DuckDuckGo, crates.io and npm (30 of 30 each), the sites H8b's rule for Q named. The cap bounds a page that never goes quiet | `LOADING_QUIET_MS` and `LOADING_CAP_SECONDS` in `jev_ultrafast/browser.py` |
+| D7 | Wait while a content request is in flight, until **100 ms** of quiet, and stops polling **5 s** after the last input. **No minimum wait** | The user's rule (§4.1): code waits only while it sees loading. H8b's 500 ms minimum was a timing margin, not a signal. Without it, H8c's and H8d's gate caught every false DONE. On Google Flights, a request carried from before the click (D13) held 6 of the gate's 10 first answers, and the freshness check caught the 2 that saw no loading. The replays' median wait fell from 195 ms to 0 ms (§3). §4.7 has the risk that remains. 100 ms of quiet matched 500 ms on DuckDuckGo, crates.io and npm (30 of 30 each), the sites H8b's rule for Q named. The cap bounds a page that never goes quiet | `LOADING_QUIET_MS` and `LOADING_CAP_SECONDS` in `jev_ultrafast/browser.py`. The cap also sets D13's carry-over window, on purpose: a request older than the cap could not hold a wait anyway |
 | D8 | Count only **Document (main frame), XHR, Fetch and Script** requests | These bring a page its content; images, fonts and media do not change what a read shows. A cross-site iframe's document never reports its end on the tab's session (H8's capped replays) | `LOADING_TYPES`, and the frame test in `Browser._track()` |
-| D9 | Wait at **every** DONE or BLOCKED answer while loading is visible, until **5 s after the last input**, when it stops polling. A WAIT step is not an input | Waiting at every answer, not once per input, replaces the minimum: a page that starts loading after one answer is waited for at the next (H8c). The deadline bounds the cost: a page that never goes quiet costs at most 5 s per input, however many answers follow. It also keeps a later goal's first answer from waiting on an old input. A drain in progress at the deadline can run past it, by up to browser-harness's 5 s reply timeout | `Browser.act()`, and the first lines and the loop's cap test in `Browser.wait_for_loading()` |
-| D10 | Record each wait as `[ms, capped, lost]` in the run file's `loading_waits`; `lost` means that since the first input or the last recorded wait, a drain came back full, or one failed. A full buffer between goals counts too: a long idle gap can fill it, so a goal's first wait may report a loss that no input of its own could suffer. `scripts/report_runs.py` counts the waited ms, caps and losses. Claude's result text does not change | The only sign outside the test pages that the wait fires, caps or loses events. It mirrors D5 | `_fresh_state` in `agent.py`; the `totals` in `report_runs.py` |
+| D9 | Wait at **every** DONE or BLOCKED answer while loading is visible, until **5 s after the last input**, when it stops polling. A WAIT step is not an input | Waiting at every answer, not once per input, replaces the minimum: a page that starts loading after one answer is waited for at the next, when there is one (H8c); an answer that stands before any loading starts is §4.7's risk. The deadline bounds the cost: a page that never goes quiet costs at most 5 s per input, however many answers follow. It also keeps a later goal's first answer from waiting on an old input. A drain in progress at the deadline can run past it, by up to browser-harness's 5 s reply timeout | `Browser.act()`, and the first lines and the loop's cap test in `Browser.wait_for_loading()` |
+| D10 | Record each wait as `[ms, capped, lost]` in the run file's `loading_waits`; `lost` means that since the first input or the last recorded wait, a drain came back full, or one failed. A full buffer between goals counts too: a long idle gap can fill it, so a goal's first wait may report a loss that no input of its own could suffer. A wait a stop interrupts is not recorded, and its `lost` carries into the next wait. `scripts/report_runs.py` counts the waited ms, caps and losses. Claude's result text does not change | The only sign code has, outside the test pages, that the wait fires, caps or loses events; another client's drain leaves none (§4.5). It mirrors D5 | `_fresh_state` in `agent.py`; the `totals` in `report_runs.py` |
 | D11 | The wait **checks the run's stop condition** every poll | A cancellation, the run's time budget or a server shutdown ends the wait, as they end §2's repeats | the `stop=` argument in `Agent.command("act")` |
 | D12 | While Jev decides, from the first input on, a **background thread drains** the daemon's event buffer every 20 ms | The buffer keeps only the last 500 events. In H8, drains covering 5 s after a search held 400 or more in 11 of 50 trials, and 500 in 4. H8b's prototype drained every 20 ms while its simulated Jev decided, in every round; this keeps that cadence | `Browser.draining()`, used around `choose()` in `Agent.command("predict")` |
 | D13 | After a new input, requests **seen less than 5 s before it are still waited for**. Tracking starts at the first input, when the browser enables the Network domain. Nothing is carried into the first input that runs, so the start page's own requests are never waited for, even after a first input stopped before it ran (v4.1) | Search, then scroll, then DONE: without it, the scroll would clear the search's request, and the wait would miss the results still loading (cycle-1 review). Starting at the first input keeps the start page's own requests out, as the prototype did (cycle-2 review). **Ran live on Google Flights, not in the scroll case:** a results request sent just before the search click was carried across it. It was the only loading seen at 6 of the gate's 10 first answers there, and at 3 of the 27 false DONEs; without it, test 1 would have failed (§3). H8c's test 4 never reached a scroll during loading. Offline test 8 covers the rule, and the live check's scroll line will cover the scroll case on a local page (§4.6) | the `self.loading = {...}` line, and the first-input `Network.enable`, in `Browser.act()` |
+| D14 | Before the first input, a read **does not drain** the daemon's buffer (v4.2) | Nothing is tracked yet, so that drain did nothing for the wait. It emptied the buffer other clients of the daemon share, and a drain that failed there threw away a good read: the start page's, or `finish()`'s in a run with no input (review N1). Test 27 pins it | the `if self.network:` guard in `Browser.observe()` |
 
 ### 4.1 One protocol, with §2
 
@@ -1459,8 +1417,8 @@ Jev's.
 
 | The page | How code knows | What code does | Where |
 | --- | --- | --- | --- |
-| A read times out after a step: its main thread is busy | `TimeoutError`, and no dialog open | reads again, at most 2 more times (§2, H5) | `agent.py` |
-| Jev answers DONE or BLOCKED while the page still loads what recent inputs started | a content request in flight, or one sent or ended in the last 100 ms | waits, at every such answer, until 5 s after the last input (this section; H8b to H8d) | `browser.py`, called from `agent.py` |
+| A read times out after a step: its main thread is busy | `TimeoutError` | reads again, at most 2 more times (§2, H5) | `agent.py` |
+| Jev answers DONE or BLOCKED while the page still loads what recent inputs started | a content request in flight, or one seen to start or end in the last 100 ms | waits, at every such answer, until 5 s after the last input (this section; H8b to H8d) | `browser.py`, called from `agent.py` |
 | It changed since the read Jev answered on | the read's marker (URL, title, text, controls) differs | the answer is stale: a new read, and Jev answers again (existing) | `agent.py` |
 | An input's target moved, changed or is covered | the freshness check and hit-test before the input (existing) | nothing runs; a new read (existing) | `browser.py` |
 | Code cannot tell | a page that has not started loading when Jev answers; or whose requests a full buffer dropped | treated as loaded: the freshness check decides. If the page has changed, Jev answers again on what it now shows, and that answer waits if loading has started | — |
@@ -1473,11 +1431,15 @@ Jev's.
 **So, "still loading, or did the step fail?"** The browser has no single loading status. In H8b's trials, Google
 Flights' first request was seen 194–422 ms after its Search click, and only then did it load its results. H8b's
 prototype discarded events from before the click. H8c's code kept them, and saw a results request sent just before
-the click in 14 of 20 trials (D13). So code waits out the loading it can see, at every final answer, and adds no
-margin of its own. Then:
+the click in 14 of 20 trials (D13). So code waits out the loading it can see, at every final answer. Its one margin is
+D7's 100 ms of quiet after the last request it saw start or end, since a follow-up request often starts within
+milliseconds; with no loading seen, there is no wait at all. Then:
 
 - **If the page matches the read Jev answered on,** the answer stands.
 - **If the page changed,** Jev answers again on what it now shows.
+
+**Where §2 meets this wait:** a read that times out after a step takes 5 s, so after §2's repeated read the input's
+5 s have passed, and the next final answer does not wait; the freshness check decides (§4.5, §4.7).
 
 ### 4.2 The problem in the code
 
@@ -1490,7 +1452,13 @@ margin of its own. Then:
 - **Under a fast Jev it is common:** in H8b, today's check accepted 24 of 50 such answers before the results loaded,
   each with a request still in flight (§3). In H8c and H8d it accepted 27 of 60, and loading was visible at all 27.
   - **An upper bound:** that simulated Jev answered DONE after every read, at 275 ms.
-  - **In real runs:** 1 of the 78 run files has such a false DONE.
+  - **In real runs:** 3 of the 76 public runs of 2026-09-24 ended DONE before their results rendered
+    (`possible_false_dones()`, `docs/failure-review.md`). One is 052252-e4b2, above. The first automatic review, on
+    2026-09-29, flagged the other two on its own: DuckDuckGo `20260924-100333-757e` and crates.io
+    `20260924-111852-243b`, both in §1's H3. e4b2 was labelled failed; the other two passed, by Claude alone, so
+    only the false-DONE flag queued them. Each final DONE came 307–815 ms after its last step, inside D9's 5 s.
+- **What will show it works:** the report's loading totals show the wait firing; its "possible false DONEs" line, and
+  the reviews' label flags, show whether early DONEs stop.
 
 ### 4.3 The change
 
@@ -1501,13 +1469,14 @@ started to finish loading. Then the existing freshness check runs, unchanged.
 
 - **The events are already there:** the browser-harness daemon records every CDP event, including this tab's. The tab
   only needs `Network.enable`, which the browser calls at the first input.
-- **When the browser drains them:** after every read, from the first; and from the first input on, before each
-  input, every 20 ms while Jev decides, and during the wait. Before the first input, a read's drain only empties
-  the buffer: nothing is tracked yet.
+- **When the browser drains them:** from the first input on, after every read, before each input, every 20 ms while
+  Jev decides, and during the wait. Before the first input, reads leave the buffer alone (v4.2): nothing is tracked
+  yet, and the buffer is every client's.
 - **What it does not drain:** the input itself; the settle and the read after it, including §2's repeated reads, up
   to about 15 s on a busy page; a TYPE_TEXT's text call; and the gaps between the inspector's step-mode buttons. A
   full drain after any of them, or a drain that fails in a read or while Jev decides, is recorded as `lost` in
-  the next wait.
+  the next wait. A drain that fails in a read also fails that read: the run goes on only when §2 repeats it, a
+  timeout in the read after a step, or when it is `finish()`'s read, which never stops a run.
 - **What it follows:** from the first input on, the content requests seen in the 5 s before each input and since.
 
 **Why it fits the loop:**
@@ -1558,6 +1527,9 @@ LOADING_TYPES = {"Document", "XHR", "Fetch", "Script"}  # the requests that brin
 DAEMON_EVENTS = 500  # browser-harness 0.1.13 keeps its last 500 events (daemon.py BUF); a drain this long lost some
 ```
 
+The comment cites H8c, whose trials ran this code without a minimum; the rule to drop it came from H8d's
+registration (§3). The code keeps its tested comment.
+
 In `__init__`, after `self.call("Page.enable")`:
 
 ```python
@@ -1566,7 +1538,8 @@ In `__init__`, after `self.call("Page.enable")`:
             self.network, self.loading, self.last_request, self.input_done, self.lost = False, {}, None, None, False
 ```
 
-`observe()`: the read loop drains once the read has succeeded.
+`observe()`: the read loop drains once the read has succeeded, from the first input on. v4.2 adds the guard: before
+the first input the drain was inert, since nothing is tracked yet (D14).
 
 ```python
         for attempt in range(10):
@@ -1579,7 +1552,8 @@ In `__init__`, after `self.call("Page.enable")`:
                     raise
                 time.sleep(0.02)
             else:
-                self._track()  # the settle's and the read's events, taken in before Jev answers
+                if self.network:  # D14: before the first input nothing is tracked; leave the shared buffer alone
+                    self._track()  # the settle's and the read's events, taken in before Jev answers
                 return page
         raise StalePage("Page did not settle")
 ```
@@ -1731,17 +1705,19 @@ The three methods, before `close()`:
 
 | When Jev answers DONE or BLOCKED | Before | After |
 | --- | --- | --- |
-| The results are still loading (a request in flight) | Accepted on the old read: a false DONE | Waits for the request, then 100 ms: a median of 691 ms per trial on Google Flights (H8c). The page changed, so the answer is stale, and Jev answers again on the results: one more Jev call, about 0.3 s. On YouTube, whose results keep changing after they load, two (H8d). The user accepted this cost (2026-09-25) |
+| The results are still loading (a request in flight) | Accepted on the old read: a false DONE | Waits for the request, then 100 ms: a median of 691 ms per trial on Google Flights (H8c). The page changed, so the answer is stale, and Jev answers again on the results: one more Jev call, about 0.3 s, and one more stale decision, which the report's "stale decisions" and its stale-budget flag count. On YouTube, whose results keep changing after they load, two (H8d). The user accepted this cost (2026-09-25) |
 | Before the page has sent its request, with nothing carried from an earlier input | Accepted | No wait: nothing shows loading. The freshness check decides. On Google Flights, all 3 such first answers in H8c went stale, and in the gate arm the next answers waited. No such answer stood, so the risk is inferred, not observed (§4.7) |
 | Loaded: nothing in flight, quiet | Accepted | Accepted after one drain, a few ms; up to 100 ms more if a request ended just before the answer |
-| A search, then another input (a scroll) while the results load | Accepted if fresh | Waits for the search's request too, if it was sent less than 5 s before the scroll (D13) |
+| A search, then another input (a scroll) while the results load | Accepted if fresh | Waits for the search's request too, if a drain saw it less than 5 s before the scroll (D13) |
 | The page never goes quiet (a long poll, or a `blob:` script that never ends) | Accepted | Waits until 5 s after the input, records a cap, then the freshness check decides. Later answers after that input do not wait |
 | Only a cross-site iframe (an ad) is loading | Accepted | Not tracked: no wait |
 | A second answer after the same input | Accepted if fresh | Waits again while loading is visible, until 5 s after the input (D9) |
-| The next goal's first answer, before any input of its own | Accepted if fresh | Waits while the last goal's loading is visible, if its last input is less than 5 s old (D9) |
-| A cancellation, the budget or a shutdown during the wait | — | Stops at the next poll: within 20 ms plus one drain |
+| The next goal's first answer, before any input of its own | Accepted if fresh | Waits while the last goal's loading is visible, if its last input is less than 5 s old (D9; test 25) |
+| An answer after §2's repeated reads, more than 5 s after its input | Accepted if fresh | No wait: the cap has passed, and the freshness check decides (D9). A page busy long enough to time out a read has usually loaded by then: run 7782's final screenshot shows its results |
+| A cancellation, the budget or a shutdown during the wait | — | Stops at the next poll: within 20 ms plus one drain. `loading_waits` gains no entry for that wait, and the run ends `stopped` with the stop's own note and no failure code. The review queues it as failed, which is right, since that DONE was premature. A DONE with nothing loading never polls, so it stands even with a stop pending (test 26) |
 | No input yet (a freshly opened page) | Accepted if fresh | The same (§4.7). The start page's own requests never hold a later wait: tracking starts at the first input |
-| A drain returns 500 events, or one fails in a read or while Jev decides, so events may be lost | — | Goes on with what it saw: it may end early (as before §4) or wait out its cap. The next recorded wait has `lost` set |
+| A drain returns 500 events, or one fails while Jev decides, so events may be lost | — | Goes on with what it saw: it may end early (as before §4) or wait out its cap. The next recorded wait has `lost` set |
+| A drain fails in a read | — (nothing drains today) | The read fails, as on any read error, and the run stops, unless it is the read after a step and the failure a timeout, which §2 repeats, or `finish()`'s read. The next recorded wait then has `lost` set (test 24). A drain that times out every repeat after a step reads as a busy page: `busy_after_step`, whose sentence blames the page |
 | The browser daemon closes without replying to a drain | — (nothing drains today) | Stops with "The browser daemon closed the connection." |
 | Another browser-harness client drains the same daemon | — | This wait may miss requests (then as before §4) or their ends (then its 5 s cap). Its own drains also empty that client's events |
 
@@ -1749,6 +1725,11 @@ The three methods, before `close()`:
 
 **Checked:** §4.4 applied to a copy of the repo passes `ruff check`. It passes 144 tests: the 120 existing and the
 24 below.
+
+**Rechecked at `8953b45`,** on 2026-09-29, the code the plan builds on:
+- **The diff:** it applies unchanged to five of its six files, and their applied lines equal the tested ones.
+  `tests/test_mcp_server.py` gained an import since, so its two hunks go in by hand.
+- **The result:** 241 tests pass, 217 + 24, also with browser-harness's `drain_events` failing, and ruff passes.
 
 - **No test reaches the daemon:** the whole suite still passes with browser-harness's real `drain_events` replaced by
   one that fails.
@@ -1765,6 +1746,8 @@ The three methods, before `close()`:
         )
     ```
 
+  - **Server-level tests keep `wait_for_loading` stubbed:** `tests/test_mcp_server.py` freezes `time.monotonic` for
+    every module, so a real wait with a request in flight would never reach its cap (review N3).
   - **`FakeBrowser` in `tests/test_mcp_server.py`** gains the same two methods. Without them, the real tick's
     `predict` fails before Jev's decision, and `test_cancellation_during_the_decision_executes_no_input` fails:
 
@@ -1808,6 +1791,13 @@ The three methods, before `close()`:
   22. `test_a_request_that_ended_before_an_input_adds_no_quiet_after_it`.
   23. `test_a_stopped_first_input_carries_nothing_into_the_first_that_runs`: fails on v4.
   24. `test_a_drain_that_fails_in_a_read_marks_the_next_wait_as_lost`: fails on v4.
+  25. `test_the_next_goals_first_answer_waits_for_the_last_goals_loading` (v4.2): §4.5's next-goal row.
+  26. `test_a_done_with_nothing_loading_stands_while_a_stop_is_pending` (v4.2): §4.5's stop row. Since `8953b45`,
+      the variant it kills matters: it would end a finished run `stopped`, and the review would queue it (review S4).
+  27. `test_a_read_before_the_first_input_leaves_the_buffer_alone` (v4.2): the guard in `observe()`.
+- **A rename:** the existing `test_loading_waits_do_not_trigger_no_progress_stop`, which is about WAIT steps, becomes
+  `test_wait_steps_do_not_trigger_no_progress_stop` (v4.2), since `loading_waits` now names this section's waits
+  (review N4).
 - **Extended tests:** `test_new_goal_resets_every_counter` checks `loading_waits`, and
   `test_report_counts_false_and_missed_done` checks the three totals.
 - **Mutation testing:**
@@ -1829,16 +1819,19 @@ The three methods, before `close()`:
     - `>` for `>=` in the quiet test: at most one 20 ms poll, so equivalent;
     - the stop checked before the loaded test: a pending stop would end a DONE with nothing loading;
     - a new goal forgetting the last goal's input: the §4.5 next-goal row is untested.
+
+    v4.2's tests 25 and 26 kill the last two; the first stays, as an equivalent.
   - **Where they are:** in `artifacts/experiments/2026-09-24/h8-network-settle/`:
     - v4.1: `design-check/v4/`, with the diff (`design-v41.diff`), `mutate_v41.py`, and the saved test and mutation
       output;
     - v4, as H8c and H8d ran it: `h8c-code/`, hashed in `registration-h8c.sha`;
     - v3: `design-check/`.
   - **Their base:** commit `523ede7`, the code this design builds on. The v3, v4 and v4.1 diffs all apply to it, and
-    the line numbers §2 and §4 cite in this repo's files are its lines.
+    the line numbers §2 and §4 cite in this repo's files are its lines. At `8953b45` one import hunk goes in by hand
+    ("Rechecked", above).
 
-**Specified, not yet built:** the live check, and the comment and doc edits below. They are written and reviewed in
-the implementation plan.
+**Specified, not yet built:** tests 25–27, the guard, the rename, the live check, and the comment and doc edits
+below. They are written and reviewed in the implementation plan, `docs/executor-improvements-plan.md`.
 
 **A live check** (`scripts/check_guards.py`, no model calls):
 
@@ -1877,21 +1870,29 @@ the implementation plan.
 - **Passes if:**
   - the accepted read has results in at least 9 of 10 trials for each site;
   - no wait records `lost`;
-  - each has at most one cap.
+  - each site has at most one capped trial among its 10 (plan P33).
 
 **Docs and comments:**
 
 - **`docs/claude-code-integration.md`:** where it describes how a run ends, one sentence: a final answer waits for
   loading (§4).
-- **`docs/performance.md`:** under "Changed after the comparison": the wait's cost, a median of 0 ms on H8c's replays
-  (1 of 25 capped), and that the comparison did not include it.
+- **`docs/performance.md`:** a "**Changed after the comparison:**" bullet after "Claude's labels matched every run",
+  in the doc's style for later changes. It gives the wait's cost both ways: a median of 0 ms over H8c's replayed final
+  answers, 1 of 25 capped; and, where results were still loading, a median of 691 ms per trial on Google Flights, in
+  place of a false DONE and its follow-up run. And that the comparison did not include it.
 - **`mcp_server.py`:**
   - `check_stop`'s comment adds "and while waiting for loading";
   - `shut_down`'s first comment line adds the loading wait to where a run stops;
   - its ponytail line is unchanged: the wait checks the stop flag every poll, so only a hung drain could outlast
     `SHUTDOWN_WAIT_SECONDS`, as any CDP call can.
-- **With §2:** the `before_input` comment reads "before each text call and input, each repeated read, and during a
-  loading wait".
+- **README.md,** "Wait for useful state": one sentence, since it lists every wait the loop makes: "A DONE or
+  BLOCKED answer also waits while a request its recent inputs started is loading, up to 5 s after the last input."
+- **`docs/claude-code-integration.md`,** also: "Deadline, cancellation and shutdown" adds the wait's polls, and the
+  Speed row adds the wait's three totals.
+- **`docs/failure-review.md`:** its rows and bullet that call the loading wait and the repeated read "(not built)",
+  and `busy_after_step`'s definition, which becomes "because the read after it failed, repeats included".
+- **With §2:** the `before_input` comment is one line, within ruff's 120 characters:
+  `# optional stop check before text calls, inputs and read repeats, and during a loading wait; raising stops them`.
 
 ### 4.7 Not in this change
 
@@ -1900,8 +1901,11 @@ the implementation plan.
   only for a GET navigation, since reloading a form submission can send it again.
 - **The start page:** the first answer on a freshly opened page does not wait, because the navigation in
   `Browser.__init__` is not an input. Untested; lead 1 in §3.
-- **Answers other than DONE and BLOCKED:** an input on a page still loading is already guarded by the freshness check
-  and the hit-test.
+- **Answers other than DONE and BLOCKED:** an input does not end the run. Acting on the page Jev saw is right while it
+  has not changed, and the freshness check and the hit-test stop the input once it has. A final answer ends the run,
+  so an unchanged page cannot be trusted to have finished.
+- **An answer after §2's repeated reads:** it comes more than 5 s after its input, so it does not wait (§4.5). A page
+  busy long enough to time out a read has usually loaded by then; if it has not, the freshness check decides.
 - **Signals the page reports,** such as `aria-busy` or progress bars: untested; lead 2.
 - **A daemon of the executor's own:** it would own its event buffer, but would need Chrome's approval again. Lead 3.
 - **A page that changes nothing, then starts loading after Jev answers:** no wait, and the freshness check accepts
@@ -1929,7 +1933,8 @@ the implementation plan.
 ### 4.8 Alternatives not taken
 
 - **Keep H8b's 500 ms minimum** (v3): verified by H8b, but a timing guess, not a signal. Dropped by the user's
-  rule, which trades the risk in §4.7 for cost: the replays' median wait fell from 195 ms to 0 ms (§3).
+  rule, which trades the risk in §4.7 for cost. The minimum cost a median of 195 ms per replayed final answer, on
+  every run, for a wait nothing on the page justified; without it the median is 0 ms (§3).
   - **H8c:** the freshness check caught both gate answers made before Google Flights' request with nothing carried
     (trials 4 and 5).
   - **H8c's today arm:** the check alone let 3 of 7 early answers stand, each with a carried request that the gate
