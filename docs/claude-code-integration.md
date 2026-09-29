@@ -176,7 +176,7 @@ Not adopted:
 | **Uncertain steps** | The executor acts on Jev's top answer. Confidence is recorded, and the report tests it. | Frictionless; data before gates |
 | **Site boundary** | By default, the site the run starts on: its host without `www.`, plus subdomains. `allowed_sites` widens it, and `["*"]` lifts it. | This assumes cross-site jumps mostly mean sign-in or payment, which Claude should see; the report's site-change count (§7.4) tests that. It costs one extra Claude turn when the goal needs another site, and reverses the previous draft's "no default limit". |
 | **Missing values** | The executor stops and names the field. Claude re-instructs with the value. | Values stay in the instruction, where the run file shows them |
-| **Tab ownership** | The executor owns one tab, in its own window that never takes keyboard focus (`JEV_BACKGROUND_TAB=1`: a hidden tab in the current window). It closes on the next `url` call or when the server exits. | One controller per tab, no cleanup tool |
+| **Tab ownership** | The executor owns one tab, in its own window that never takes keyboard focus (`JEV_BACKGROUND_TAB=1`: a hidden tab in the current window), unless a run passes `foreground_window=True`. It closes on the next `url` call or when the server exits. | One controller per tab, no cleanup tool |
 | **Server name and dependency** | `jev-ultrafast`, with `browser-harness[mcp]` as a regular dependency | Tool names say what acts, and there is no optional-extra path |
 | **Scope** | User-level MCP server, pre-allowed with `mcp__jev-ultrafast__*`, started lazily | Works in every project with no prompts. Sessions that never browse never touch Chrome. |
 
@@ -226,13 +226,14 @@ Claude then: verifies → report_outcome → next instruction
 
 ### 6.1 Tools (both called by Claude)
 
-1. **`run_goal(goal, url=None, allowed_sites=None, allow_commit=False)`: delegate one bounded sub-goal to the executor.**
+1. **`run_goal(goal, url=None, allowed_sites=None, allow_commit=False, foreground_window=False)`: delegate one bounded sub-goal to the executor.**
    - With `url`: close the previous owned tab, open a new one in its own unfocused window, and start a new run.
    - `url` must start with `http://` or `https://`. Anything else returns `stopped` and opens nothing.
    - Without `url`: start a new run in the current tab. The state is rebuilt fresh; the page and node identities stay. This is how Claude steers or continues.
    - Without `url` and with no open tab (the first call, after the server restarted, or after the tab was closed): return `stopped: no open tab; call run_goal with a url`, and open nothing.
    - `allowed_sites` widens the site boundary (§4) for this run.
    - `allow_commit=True` lets this run pass a step whose target Jev judges would pay, buy, book, send, delete, or change account settings (§4.1). Claude passes it only when the user asked for that commit.
+   - `foreground_window=True` brings the tab's window in front of every other window, taking keyboard focus, before the run's first step, so you can watch it. Without it, the window stays behind yours. Claude passes it when you ask to watch a run. The run file's `call` records it.
 2. **`report_outcome(run_id, passed, evidence, by="claude", lesson=None, lesson_detail=None)`: label a run after verifying it.**
    - `passed` means the goal's end state is visibly true on the fresh page read and screenshot, whatever the run's status. Every run gets a label, including `blocked` and `stopped` ones.
    - `evidence` names what Claude checked, for example "URL is /travel/flights/search; fields read Zürich, London, Thu Oct 22; results visible in the screenshot".

@@ -416,13 +416,33 @@ def test_run_file_keys_and_no_screenshot():
     [path] = Path("artifacts/runs").glob("*.json")
     run = json.loads(path.read_text())
     assert {"call", "attempt", "result", "source", "pid", "target", "outcome"} <= set(run)
-    assert run["call"] == dict(goal="Search flights", url=URL, allowed_sites=["example.org"], allow_commit=False)
+    assert run["call"] == dict(
+        goal="Search flights", url=URL, allowed_sites=["example.org"], allow_commit=False, foreground_window=False
+    )
     assert run["pid"] == os.getpid() and run["target"] == "T1" and run["source"] == mcp_server.SOURCE
     assert run["result"] == {"status": "done", "notes": [], "text": text}
     assert run["page"] == page("Results")  # the fresh final read, without its screenshot
     assert SCREENSHOT not in path.read_text()
     assert path.with_suffix(".jpg").read_bytes() == image.data == base64.b64decode(SCREENSHOT)
     assert text.endswith(f"run file: {path.absolute()}")
+
+
+@pytest.mark.parametrize(
+    ("url", "foreground_window"),
+    [(URL, True), (URL, False), (None, True)],
+    ids=["a new tab, watched", "a new tab, not watched", "the current tab, watched"],
+)
+def test_a_watched_run_brings_its_window_forward_before_its_first_step(url, foreground_window, monkeypatch):
+    if url is None:  # an earlier run's tab to continue in
+        STEPS[:] = [done]
+        mcp_server.run_goal("Search", url=URL)
+    calls, at_first_step = [], []
+    monkeypatch.setattr(mcp_server, "cdp", lambda method, **params: calls.append((method, params)) or {})
+    STEPS[:] = [lambda agent: at_first_step.append(list(calls)) or done(agent)]
+    [text, _image] = mcp_server.run_goal("Search", url=url, foreground_window=foreground_window)
+    assert " · done · " in text
+    assert at_first_step == [[("Target.activateTarget", {"targetId": "T1"})] if foreground_window else []]
+    assert mcp_server.AGENT.state["call"]["foreground_window"] is foreground_window
 
 
 def render_state(steps=0, actions=(), attempt=None):

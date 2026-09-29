@@ -64,7 +64,7 @@ uv run jev
 
 Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. The inspector shows numbered elements, operation probabilities, target probabilities, and executed actions. **Choose next** pauses before execution.
 
-Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted. Each run works in its own Chrome window, opened without taking keyboard focus, so you can watch it; `JEV_BACKGROUND_TAB=1` in `.env` uses a hidden tab in your current window instead.
+Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted. Each run works in its own Chrome window, opened behind yours without taking keyboard focus; `JEV_BACKGROUND_TAB=1` in `.env` uses a hidden tab in your current window instead. To watch a run, `run_goal`'s `foreground_window=true` brings its window to the front before the first step.
 
 `TEXT_MODEL_API_KEY` is an OpenRouter key in the example configuration. The current demo uses `inception/mercury-2.5` with reasoning disabled. Gemini, GLM, and DeepSeek can also use the OpenAI-compatible text helper; configure the appropriate model, endpoint, and reasoning setting.
 

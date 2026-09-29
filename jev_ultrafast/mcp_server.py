@@ -77,11 +77,17 @@ SHOWN_NOTES = set()  # the notes this server's results showed: only they count a
 
 
 def run_goal(
-    goal: str, url: str | None = None, allowed_sites: list[str] | None = None, allow_commit: bool = False
+    goal: str,
+    url: str | None = None,
+    allowed_sites: list[str] | None = None,
+    allow_commit: bool = False,
+    foreground_window: bool = False,
 ) -> list[str | Image]:
     """Delegate one bounded browser sub-goal to Jev in an owned Chrome tab, in its own window.
 
     With url: close the previous tab and open url in a new one. Without url: continue in the current tab.
+    With foreground_window: bring the tab's window in front of every other window, taking keyboard focus, before the
+    first step, for a run the user wants to watch. Without it, the window stays behind theirs.
     Returns the status, the steps, a fresh page read, and a screenshot.
     """
     try:
@@ -108,12 +114,12 @@ def run_goal(
             return [f"stopped: {error}"]
         IDLE.clear()  # from here SIGTERM waits, so a tab that is still opening gets closed
         try:
-            return start_run(goal, url, allowed_sites, allow_commit)
+            return start_run(goal, url, allowed_sites, allow_commit, foreground_window)
         finally:
             IDLE.set()
 
 
-def start_run(goal, url, allowed_sites, allow_commit):
+def start_run(goal, url, allowed_sites, allow_commit, foreground_window=False):
     global AGENT
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     options = dict(allowed_sites=allowed_sites, allow_commit=allow_commit, trace_path=RUNS / f"{run_id}.json")
@@ -143,7 +149,13 @@ def start_run(goal, url, allowed_sites, allow_commit):
             return [f"stopped: {error}"]
     agent = AGENT
     agent.state.update(
-        call={"goal": goal, "url": url, "allowed_sites": allowed_sites, "allow_commit": allow_commit},
+        call={
+            "goal": goal,
+            "url": url,
+            "allowed_sites": allowed_sites,
+            "allow_commit": allow_commit,
+            "foreground_window": foreground_window,
+        },
         source=SOURCE,
         pid=os.getpid(),
         target=agent.browser.target,
@@ -161,6 +173,8 @@ def start_run(goal, url, allowed_sites, allow_commit):
 
     agent.before_input = check_stop
     try:
+        if foreground_window:  # the window opens behind the user's (browser.py); a watched run brings it forward
+            cdp("Target.activateTarget", targetId=agent.browser.target)
         while agent.state["status"] not in {"done", "blocked"}:
             check_stop()
             agent.command("tick")
