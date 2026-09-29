@@ -2,8 +2,10 @@
 
 import asyncio
 import base64
+import builtins
 import fcntl
 import importlib
+import io
 import json
 import os
 import re
@@ -11,6 +13,8 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -19,7 +23,7 @@ import browser_harness.admin
 import browser_harness.helpers
 import pytest
 
-from jev_ultrafast import browser, mcp_server
+from jev_ultrafast import browser, mcp_server, site_notes
 from jev_ultrafast.agent import Agent
 from jev_ultrafast.browser import StalePage
 
@@ -116,8 +120,13 @@ def server(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # a scratch .env and run folder; the repo's .env is never read
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     monkeypatch.setenv("TEXT_MODEL_API_KEY", "test-key")
+    monkeypatch.delenv("JEV_LEARNING", raising=False)  # learning on, whatever the shell sets
+    monkeypatch.setenv("JEV_AUTO_REVIEW", "0")  # no test starts a review unless it turns them on
+    monkeypatch.setattr(mcp_server, "start_review", Mock())  # records a start; never a real process
     monkeypatch.setattr(mcp_server, "Agent", FakeAgent)
     monkeypatch.setattr(mcp_server, "AGENT", None)
+    monkeypatch.setattr(mcp_server, "PREVIOUS_RUN", None)
+    monkeypatch.setattr(mcp_server, "SHOWN_NOTES", set())
     monkeypatch.setattr(anyio.from_thread, "check_cancelled", lambda: None)
     monkeypatch.setattr(mcp_server.time, "monotonic", lambda: CLOCK[0])
     CLOCK[0] = 0.0
@@ -587,6 +596,278 @@ def test_import_does_not_touch_chrome(monkeypatch):
     assert chrome.mock_calls == []
     monkeypatch.undo()
     importlib.reload(mcp_server)  # rebind the real helpers for later tests
+
+
+def test_server_instructions_list_the_approved_notes(monkeypatch):
+    today = date.today().isoformat()
+    notes = [
+        {**site_notes.SEEDS[1], "created": today, "approved": today},  # apod.nasa.gov
+        {**site_notes.SEEDS[2], "created": today, "approved": today},  # arxiv.org, excluded below
+        {**site_notes.SEEDS[0], "created": today, "approved": None},  # clinicaltrials.gov, unapproved
+    ]
+    Path("artifacts").mkdir()
+    Path("artifacts/site-notes.json").write_text(json.dumps(notes))
+    Path("artifacts/review-exclude.txt").write_text("arxiv.org\n")
+    hints = f"{site_notes.INSTRUCTIONS_HEADING} apod.nasa.gov: scroll to the control first, in its own goal"
+    assert mcp_server.build_server().instructions == f"{mcp_server.INSTRUCTIONS}\n{hints}"
+    monkeypatch.setenv("JEV_LEARNING", "")  # so the .env line below applies, then is restored
+    Path(".env").write_text("JEV_LEARNING=0\n")
+    assert mcp_server.build_server().instructions == mcp_server.INSTRUCTIONS
+
+
+def test_import_reads_no_env_and_no_notes(monkeypatch):
+    Path(".env").write_text("=stray\n")  # unreadable: loading it raises ValueError
+    Path("artifacts").mkdir()
+    Path("artifacts/site-notes.json").write_text(json.dumps(site_notes.SEEDS))
+    opened = []
+
+    def recording(real_open):
+        def open_and_record(file, *args, **kwargs):
+            opened.append(Path(str(file)).name)
+            return real_open(file, *args, **kwargs)
+
+        return open_and_record
+
+    with monkeypatch.context() as patch:  # pathlib opens through io.open, the notes lock through open
+        patch.setattr(io, "open", recording(io.open))
+        patch.setattr(builtins, "open", recording(builtins.open))
+        importlib.reload(mcp_server)
+        assert not {".env", "site-notes.json"} & set(opened)
+        mcp_server.build_server()  # the server's start reads both, and outlives the .env error
+        assert {".env", "site-notes.json"} <= set(opened)
+
+
+def jev_answers_blocked(agent):
+    agent.state["decisions"].append({"operation": "BLOCKED", "usage": {}})
+    agent.state["status"] = "blocked"
+
+
+def run_id_of(text):
+    return text.split()[1]  # "run <id> · …"
+
+
+def site_note(**changes):
+    """A note on the fake page's site, example.test, dated today so that it is in use."""
+    today = date.today().isoformat()
+    note = {**site_notes.SEEDS[1], "id": "example.test-1", "site": "example.test", "created": today, "approved": today}
+    return {**note, **changes}
+
+
+def write_notes(notes):
+    Path("artifacts").mkdir(exist_ok=True)
+    Path("artifacts/site-notes.json").write_text(json.dumps(notes))
+
+
+def example_notes():
+    return [note for note in site_notes.load()[0] if note["site"] == "example.test"]
+
+
+def test_run_file_records_previous_run_and_failure(monkeypatch):
+    STEPS[:] = [jev_answers_blocked]
+    first = run_id_of(mcp_server.run_goal("Search", url=URL)[0])
+    STEPS[:] = [done]
+    second = run_id_of(mcp_server.run_goal("Search again")[0])
+    runs = {path.stem: json.loads(path.read_text()) for path in Path("artifacts/runs").glob("*.json")}
+    assert (runs[first]["previous_run"], runs[first]["failure"]) == (None, "jev_blocked")
+    assert (runs[second]["previous_run"], runs[second]["failure"]) == (first, None)
+    # Stops that wrote no run file leave it: one inside start_run, and a run whose save failed.
+    monkeypatch.setattr(mcp_server, "Agent", raises(RuntimeError("no Chrome")))
+    assert mcp_server.run_goal("Search", url=URL) == ["stopped: no Chrome"]
+    monkeypatch.setattr(mcp_server, "Agent", FakeAgent)
+    monkeypatch.setattr(FakeAgent, "save", raises(RuntimeError("Run file incomplete: disk full")))
+    STEPS[:] = [done]
+    assert "Run file incomplete" in mcp_server.run_goal("Search", url=URL)[0]
+    assert mcp_server.PREVIOUS_RUN == second
+
+
+def test_notes_sit_before_the_fields_and_survive_the_cut():
+    write_notes([site_note()])
+    STEPS[:] = [done]
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    assert text.index("\npage now: ") < text.index(site_notes.NOTES_HEADING) < text.index("\nfields:")
+    assert text.splitlines()[1].endswith("; see the site notes below")
+    assert run_file()["notes_shown"] == ["example.test-1"]
+    # 60 steps and 60 long fields overflow the result: the cut takes the fields and keeps the notes.
+    block = site_notes.render_site_notes("example.test", None, [site_note()])
+    state = render_state(60, [field(n, f"{n:02d} " + "f" * 77, "value") for n in range(1, 61)])
+    text = mcp_server.render("20260924-120000-abcd", "blocked", [], state, site_notes_block=block)
+    assert text.count(mcp_server.CUT) == 1 and len(text) <= mcp_server.RESULT_CHARACTERS
+    assert text.index(site_notes.NOTES_HEADING) < text.index(mcp_server.CUT)
+    assert state["notes_shown"] == ["example.test-1"]
+
+
+@pytest.mark.parametrize("case", ["a page quoting a note ID", "a note the cut removed"])
+def test_notes_shown_counts_only_placed_notes(case, monkeypatch):
+    if case == "a page quoting a note ID":
+        state = render_state()
+        state["page"]["text"] = f"{site_notes.NOTES_HEADING}\nexample.test-1 · approved"
+        text = mcp_server.render("20260924-120000-abcd", "done", [], state)
+        assert "example.test-1" in text and state["notes_shown"] == []
+    else:  # two notes whose lines read the same, and a cut inside the second's line: only the first counts
+        block = site_notes.render_site_notes("example.test", None, [site_note(), site_note(id="example.test-2")])
+        heading, first, second = block[0].split("\n")
+        fields = [field(n, f"field {n}") for n in range(1, 61)]  # after the notes, so the cut has them to take
+        uncut = mcp_server.render("20260924-120000-abcd", "done", [], render_state(0, fields), site_notes_block=block)
+        second_end = uncut.index(heading) + len(block[0])
+        tail = len(uncut) - uncut.rindex("\n</untrusted page content")
+        monkeypatch.setattr(mcp_server, "RESULT_CHARACTERS", second_end - 1 + len(f"\n{mcp_server.CUT}") + tail)
+        state = render_state(0, fields)
+        text = mcp_server.render("20260924-120000-abcd", "done", [], state, site_notes_block=block)
+        assert first == second and text.count(first) == 1 and state["notes_shown"] == ["example.test-1"]
+
+
+def typed(agent):
+    """One executed TYPE_TEXT with an 80-character label and text: 60 of them fill a result."""
+    click(agent)
+    agent.state["history"][-1].update(kind="fill", action="a" * 80, text="t" * 80)
+
+
+def test_results_count_shown_notes_and_later_failures():
+    write_notes([site_note(failure="jev_blocked", approved=None)])
+    STEPS[:] = [jev_answers_blocked]
+    mcp_server.run_goal("Search", url=URL)  # no earlier result showed the note, so this failure counts nothing
+    [note] = example_notes()
+    assert (note["shown"], note["last_shown"], note["failed_after"]) == (1, date.today().isoformat(), 0)
+    STEPS[:] = [jev_answers_blocked]
+    mcp_server.run_goal("Search", url=URL)
+    [note] = example_notes()
+    assert (note["shown"], note["failed_after"]) == (2, 1)  # the failure counts first, then its result shows it
+    STEPS[:] = [typed] * 60 + [done]  # the cut takes the notes, so this result counts none
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    [note] = example_notes()
+    assert site_notes.NOTES_HEADING not in text and note["shown"] == 2
+    mcp_server.SHOWN_NOTES.clear()  # a new session: its results have not shown the unapproved note yet
+    STEPS[:] = [jev_answers_blocked]
+    mcp_server.run_goal("Search", url=URL)
+    [note] = example_notes()
+    assert (note["failed_after"], note["retired"]) == (1, None)  # P20: the failure before it showed does not count
+
+
+def test_next_step_names_the_recovery_for_a_failure_code():
+    STEPS[:] = [jev_answers_blocked]
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    assert text.splitlines()[1] == "next: " + site_notes.NEXT_BY_FAILURE["jev_blocked"]
+    write_notes([site_note()])
+    STEPS[:] = [done]
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    assert text.splitlines()[1] == f"next: {mcp_server.NEXT['done']}; see the site notes below"
+    STEPS[:] = [jev_answers_blocked]
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    assert text.splitlines()[1] == f"next: {site_notes.NEXT_BY_FAILURE['jev_blocked']}; see the site notes below"
+
+
+def recovery(lesson, by="claude"):
+    """A done run and a run Jev blocked, both left unlabelled, then a passing run in the same tab, labelled with a
+    lesson. The blocked run counts as failed by its status (P21); the done run does not."""
+    STEPS[:] = [done]
+    mcp_server.run_goal("Open the archive", url=URL)
+    STEPS[:] = [jev_answers_blocked]
+    failed = run_id_of(mcp_server.run_goal("Find the archive", url=URL)[0])
+    STEPS[:] = [done]
+    recovered = run_id_of(mcp_server.run_goal("Scroll to the archive")[0])
+    detail = "The archive link sits below the image."
+    return failed, recovered, mcp_server.report_outcome(recovered, True, "opened", by, lesson, detail)
+
+
+def test_a_lesson_after_a_recovery_stores_an_unapproved_note():
+    failed, recovered, reply = recovery("scroll_first", by="user")  # the user's label still stores it unapproved
+    assert reply == (
+        f"Recorded passed by user for run {recovered}. Note stored as example.test-1, unapproved: "
+        "only the user approves notes."
+    )
+    [note] = example_notes()
+    assert (note["hint"], note["approved"], note["failure"]) == ("scroll_first", None, "jev_blocked")
+    assert note["runs"] == {"failed": [failed], "recovered": recovered}
+
+
+REFUSED_LESSONS = {  # each case and the reason it names
+    "a pass with no failed run before it": "no earlier run on this sub-goal failed",
+    "a failed run with another hint": "on a failed run, only use_claude_in_chrome records a lesson",
+    "an unknown hint": "its hint is not one of",
+}
+
+
+@pytest.mark.parametrize("case", REFUSED_LESSONS)
+def test_a_lesson_is_refused_without_a_recovery_or_fallback(case):
+    if case == "a pass with no failed run before it":
+        STEPS[:] = [done]
+        run_id = run_id_of(mcp_server.run_goal("Search", url=URL)[0])
+        reply = mcp_server.report_outcome(run_id, True, "ok", lesson="scroll_first", lesson_detail="Scroll first.")
+    elif case == "a failed run with another hint":
+        STEPS[:] = [jev_answers_blocked]
+        run_id = run_id_of(mcp_server.run_goal("Search", url=URL)[0])
+        reply = mcp_server.report_outcome(run_id, False, "no", lesson="scroll_first", lesson_detail="Scroll first.")
+    else:
+        *_, reply = recovery("click_harder")
+    assert "Recorded" in reply and f"Note not stored: {REFUSED_LESSONS[case]}" in reply and example_notes() == []
+
+
+def test_a_fallback_lesson_records_claude_in_chrome():
+    STEPS[:] = [jev_answers_blocked]
+    run_id = run_id_of(mcp_server.run_goal("Pick a date", url=URL)[0])
+    detail = "The date picker is drawn on a canvas."
+    reply = mcp_server.report_outcome(run_id, False, "finished in Chrome", "claude", "use_claude_in_chrome", detail)
+    assert reply.endswith("Note stored as example.test-1, unapproved: only the user approves notes.")
+    [note] = example_notes()
+    assert (note["hint"], note["detail"], note["failure"]) == ("use_claude_in_chrome", detail, "jev_blocked")
+    assert note["runs"] == {"failed": [run_id], "recovered": None}
+    STEPS[:] = [done]  # a later run passes: the same hint is then a recovery's lesson (design §6.3)
+    passing = run_id_of(mcp_server.run_goal("Pick the date again")[0])
+    reply = mcp_server.report_outcome(passing, True, "the date shows", "claude", "use_claude_in_chrome", detail)
+    assert reply.endswith("Note stored as example.test-2, unapproved: only the user approves notes.")
+    assert example_notes()[1]["runs"] == {"failed": [run_id], "recovered": passing}
+
+
+TRIGGER_CASES = {  # each case, and whether report_outcome starts a review
+    "no state": True,
+    "a next_due passed": True,
+    "a next_due later than now": False,
+    "JEV_AUTO_REVIEW=0": False,
+    "JEV_LEARNING=0": False,
+    "the script missing": False,
+    "a start error": True,
+}
+
+
+@pytest.mark.parametrize("case", TRIGGER_CASES)
+def test_review_trigger_starts_only_when_due(case, monkeypatch):
+    monkeypatch.delenv("JEV_AUTO_REVIEW")  # on by default (D10)
+    STEPS[:] = [done]
+    run_id = run_id_of(mcp_server.run_goal("Search", url=URL)[0])
+    if case != "the script missing":
+        Path("scripts").mkdir()
+        Path("scripts/review_runs.py").touch()
+    if case == "a next_due passed":
+        site_notes.write_review_state({"next_due": time.time() - 1})
+    elif case == "a next_due later than now":
+        site_notes.write_review_state({"next_due": time.time() + 3600})
+    elif case in {"JEV_AUTO_REVIEW=0", "JEV_LEARNING=0"}:
+        monkeypatch.setenv(case.split("=")[0], "0")
+    elif case == "a start error":
+        mcp_server.start_review.side_effect = OSError("no such interpreter")
+    assert mcp_server.report_outcome("20260101-000000-abcd", True, "checked").startswith("No run file")
+    assert not mcp_server.start_review.called  # a label not recorded starts nothing
+    assert mcp_server.report_outcome(run_id, True, "checked") == f"Recorded passed by claude for run {run_id}."
+    assert mcp_server.start_review.called == TRIGGER_CASES[case]
+    if case == "a start error":
+        assert "no such interpreter" in Path("artifacts/reviews/auto.log").read_text()
+
+
+def test_learning_off_restores_todays_result(monkeypatch):
+    """JEV_LEARNING=0: the generic next step, no notes, no counts, no lessons and no review, as before site notes."""
+    monkeypatch.setenv("JEV_LEARNING", "0")
+    monkeypatch.delenv("JEV_AUTO_REVIEW")  # automatic reviews on, as by default: learning off still starts none
+    Path("scripts").mkdir()
+    Path("scripts/review_runs.py").touch()
+    write_notes([site_note(failure="jev_blocked")])
+    notes_file = Path("artifacts/site-notes.json").read_text()
+    STEPS[:] = [jev_answers_blocked]
+    text, _image = mcp_server.run_goal("Search", url=URL)
+    assert text.splitlines()[1] == "next: " + mcp_server.NEXT["blocked"]
+    assert site_notes.NOTES_HEADING not in text and run_file()["notes_shown"] == []
+    reply = mcp_server.report_outcome(run_id_of(text), False, "no", lesson="use_claude_in_chrome", lesson_detail="x")
+    assert reply.endswith("Note not stored: learning is off (JEV_LEARNING=0).")
+    assert Path("artifacts/site-notes.json").read_text() == notes_file and not mcp_server.start_review.called
 
 
 def start_server(tmp_path):

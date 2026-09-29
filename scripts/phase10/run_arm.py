@@ -43,7 +43,7 @@ JEV_SERVER = json.dumps(
             "jev-ultrafast": {
                 "command": "uv",
                 "args": ["run", "--directory", str(REPO), "jev-mcp"],
-                "env": {"JEV_BACKGROUND_TAB": "1"},
+                "env": {"JEV_BACKGROUND_TAB": "1", "JEV_LEARNING": "0"},
             }
         }
     }

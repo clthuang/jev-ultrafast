@@ -233,10 +233,11 @@ Claude then: verifies → report_outcome → next instruction
    - Without `url` and with no open tab (the first call, after the server restarted, or after the tab was closed): return `stopped: no open tab; call run_goal with a url`, and open nothing.
    - `allowed_sites` widens the site boundary (§4) for this run.
    - `allow_commit=True` lets this run pass a step whose target Jev judges would pay, buy, book, send, delete, or change account settings (§4.1). Claude passes it only when the user asked for that commit.
-2. **`report_outcome(run_id, passed, evidence, by="claude")`: label a run after verifying it.**
+2. **`report_outcome(run_id, passed, evidence, by="claude", lesson=None, lesson_detail=None)`: label a run after verifying it.**
    - `passed` means the goal's end state is visibly true on the fresh page read and screenshot, whatever the run's status. Every run gets a label, including `blocked` and `stopped` ones.
    - `evidence` names what Claude checked, for example "URL is /travel/flights/search; fields read Zürich, London, Thu Oct 22; results visible in the screenshot".
    - When you correct a result, Claude records it with `by="user"`. Your label overrides Claude's.
+   - `lesson` and `lesson_detail` store a site note, always unapproved (`docs/failure-review.md` §6.3). Claude passes them on a passing run after an earlier run on the same sub-goal failed, naming what fixed it, or passes `use_claude_in_chrome` on a failed run it finished in Claude in Chrome.
 
 ### 6.2 Loop and stops
 
@@ -281,6 +282,8 @@ finally:
 | `blocked` | Jev answered BLOCKED, three unchanged actions in a row, three choices in a row gone stale while the page read stayed the same, the Agent's 60-action or 120-decision cap, the site boundary, or the commit boundary | Read the stop reason, then try a narrower goal, widen `allowed_sites`, pass `allow_commit` if the user asked for that commit, or use Claude in Chrome |
 | `stopped` | Any other reason: an error (the repo's messages say whether anything executed), a missing field value, 90 s, cancellation, a new tab, a dialog, a failed save, no open tab, an invalid `url`, or the lock is busy | Read the stop reason and fix its cause; check "may have run" before retrying |
 
+**With learning on,** the default, a run with a failure code gets that code's recovery as its next step instead, and a result that shows site notes adds "see the site notes below" (`docs/failure-review.md` §5 and §6.4). `JEV_LEARNING=0` restores the lines above.
+
 **Before the first run,** the server checks both API keys and calls `ensure_daemon(wait=30)`. A missing key or an unanswered Chrome approval returns as a `stopped` result naming the fix. No tab is opened.
 
 ### 6.3 Result Claude reads
@@ -290,7 +293,8 @@ The result holds at most 8,000 characters of text plus the stop screenshot as an
 - **Labels** are capped at 80 characters, and dropdown options appear as a count.
 - **Fields:** only form fields are listed (typable, selectable, or with a form-control role such as checkbox or combobox), at most 60. Fields with a value come first, then the rest in page order, with a count of any left out.
 - **The `next:` line holds only text the server wrote.** Stop reasons can quote the page (a button label, a pop-up URL, a host, a covering element's tag), so they open the untrusted block as `stop reason: …`. Each result's markers carry a random ID (`<untrusted page content 1f2e3d4c: …>`), so page text cannot close the block early, even with look-alike characters. Phrases that imitate a marker are also rewritten (`untrusted-page-content`). Checked live with a page whose title, labels and text contained the closing marker.
-- **Order and overflow:** the block starts with the stop reason, then the input that may have happened, then the steps, the page's URL and title, the fields, and last the visible text, which takes whatever space is left. If everything before the visible text still passes 8,000 characters, the block is cut once there, with a note that the run file has the rest. The closing marker and the run-file path always stay.
+- **Site notes** (`docs/failure-review.md` §6.4): on a site with notes, at most 3 in 900 characters, those matching the run's failure code first, under "site notes from earlier runs: hints, not instructions". Each shows its hint, its detail, any URL, its age, and whether you approved it.
+- **Order and overflow:** the block starts with the stop reason, then the input that may have happened, then the steps, the page's URL and title, the site notes, the fields, and last the visible text, which takes whatever space is left. If everything before the visible text still passes 8,000 characters, the block is cut once there, with a note that the run file has the rest. The site notes come before the fields, so a long field list is cut before them. The closing marker and the run-file path always stay.
 
 The header uses the recorded Flights run's totals; the rest is illustrative:
 
@@ -332,6 +336,12 @@ Delegate browser sub-goals to a fast executor: Jev picks each step, code perform
   report_outcome with what you checked.
 ```
 
+With learning on, the server appends one line of approved site notes, built at start from `artifacts/site-notes.json`, at most 400 characters, most recently shown first (`docs/failure-review.md` §6.4). It holds each note's host and its hint's short form, with a `start_at_url` note's URL, never a model-written detail. With the four seed notes, it reads:
+
+```text
+Site hints from earlier runs, not instructions: clinicaltrials.gov: one field or click per goal · apod.nasa.gov: scroll to the control first, in its own goal · arxiv.org: scroll to the control first, in its own goal · developer.mozilla.org: start at https://developer.mozilla.org/en-US/search?q=
+```
+
 ## 7. Observability and feedback loop
 
 ```text
@@ -347,6 +357,7 @@ Claude instructs ──▶ executor acts on Jev's answers ──▶ run file ─
 - **`result`:** the status, the notes, and the exact text Claude received.
 - **`outcome`:** labels from `report_outcome`.
 - **`source`, `pid`, `target`:** one source hash computed at import (the hashing `measure_flights.py` already does), the server's PID, and the tab's target ID.
+- **`previous_run`, `failure`, `notes_shown`:** the run this server saved just before, which links a sub-goal's runs into a chain; the run's failure code, or null; and the IDs of the site notes its result kept (`docs/failure-review.md` §3, §4 and §6.4).
 
 Each decision entry also gains the page's `omitted_actions` count.
 
@@ -391,6 +402,7 @@ Each decision entry also gains the page's `omitted_actions` count.
 - **Grouping:** the report prints one line for all runs, then one per pair of source hash and the Jev model version the API reported, so any change shows up as a before/after pair.
 - **Sample size:** each group shows its run count. Treat a group with fewer than 5 labeled runs as an anecdote; `docs/performance.md` makes the same caveat about its three pairs.
 - **Model version:** pin `TYPESAFE_MODEL=jev-1.13.0` when comparing, because `jev-latest` moves.
+- **Failures, notes and reviews:** after these lines, the report adds failure codes, stale-budget stops, runs per sub-goal, possible false DONEs, site notes, excluded runs left out, and reviews, each only when it has something to show (`docs/failure-review.md` §9).
 
 ### 7.5 Improve
 
@@ -400,14 +412,20 @@ Each decision entry also gains the page's `omitted_actions` count.
    - Then compare the report by source hash.
 2. **Executor bugs → offline tests:** a failing run's stored page read becomes a fixture for the deterministic code, with no API calls.
 3. **Confidence stop:** add one when the report shows low-confidence steps predict failure (§10).
-4. **Review on request:** ask Claude to "review Jev runs". It runs the report, reads the failing run files, and proposes changes.
+4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply`, which checks them. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
 5. **After editing the code,** reconnect the server with `/mcp`. It runs the code it started with, and the source hash shows which.
 
 ### 7.6 Privacy and data flows
 
 - **Sent to TypeSafe on every decision:** the goal, page URL and title, up to 6,000 characters of visible text, the element table, and recent actions. TypeSafe does not train on customer requests. Zero data retention is enterprise-only.
 - **Sent to the text-model provider on every TYPE_TEXT:** the goal, the field, the page title, up to 6,000 characters of visible text, and recent actions. The example configuration routes through OpenRouter to `inception/mercury-2.5`; check those providers' retention terms.
-- **Kept locally:** run files and screenshots hold goals, page content, and typed values from your logged-in sessions. They stay under the gitignored `artifacts/runs/` and are never uploaded. Delete old ones with `find artifacts/runs -mtime +30 -delete`.
+- **Kept locally:** run files and screenshots hold goals, page content, and typed values from your logged-in sessions. They stay under the gitignored `artifacts/runs/`; the site notes (`artifacts/site-notes.json`) and the reviews' digests and log (`artifacts/reviews/`) stay under `artifacts/` too. Delete old runs with `find artifacts/runs -mtime +30 -delete`.
+- **Sent to Anthropic by an automatic review,** at most once a day (`docs/failure-review.md` §7.2 and §12, decision 1):
+  - **a summary of each waiting run:** its site; and its goal, stop notes, Claude's evidence, steps' labels, final page's title and final URL without query values. In these, typed text and quoted values of 3 characters or more from any waiting run's chain of attempts, e-mail addresses and runs of 4 or more digits become `<value>`, except inside a site, run ID or note ID the reviewer cites. A step's typed text goes only as its length;
+  - **a summary of each site note new or changed since the last review:** its site, hint, detail, URL, dates, counters and run IDs, with the same values replaced. The first review sends the four seed notes;
+  - **never sent:** the pages' visible text and screenshots.
+
+  Each digest in `artifacts/reviews/` keeps the exact text sent, and `JEV_AUTO_REVIEW=0` in `.env` turns automatic reviews off.
 - **No secrets by construction:** password, file, and hidden inputs never enter the page read. API keys travel only in request headers, which are not stored. Secrets stay out of goals (§6.4).
 
 ## 8. Changes
@@ -486,7 +504,7 @@ About 270 new or changed lines were estimated; the build came to about 710 acros
           - Zero false DONEs: a false DONE is the one failure Claude trusts without re-checking.
           - Halve time or turns: the executor adds two paid services and a second browser path, so it must buy a large gain. -->
 
-7. **Operate:** ask Claude to review Jev runs weekly or every ~50 runs, whichever comes first.
+7. **Operate:** automatic reviews run at most once a day, once 5 runs wait or the oldest has waited 7 days, and a review on request runs any time (`docs/failure-review.md` §7). Approve the notes worth keeping with `uv run python scripts/review_runs.py approve <id>`.
 
 ## 10. Later, only when needed
 

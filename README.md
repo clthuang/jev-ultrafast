@@ -101,7 +101,7 @@ uv run --env-file .env python examples/run.py \
 claude mcp add jev-ultrafast --scope user -- uv run --directory /path/to/jev-ultrafast jev-mcp
 ```
 
-Claude delegates a bounded browser sub-goal with `run_goal`, checks the returned page and screenshot, and labels the run with `report_outcome`. The executor stops before a likely payment, booking, message, deletion, or account change unless Claude passes `allow_commit`. Each run is saved to `artifacts/runs/`; `uv run python scripts/report_runs.py` summarizes them.
+Claude delegates a bounded browser sub-goal with `run_goal`, checks the returned page and screenshot, and labels the run with `report_outcome`. The executor stops before a likely payment, booking, message, deletion, or account change unless Claude passes `allow_commit`. Each run is saved to `artifacts/runs/`; `uv run python scripts/report_runs.py` summarizes them. Runs that stop for one of three recognized causes get a failure code, and their next step names its recovery; results show site notes from earlier runs. At most once a day, an automatic review sends scrubbed summaries of waiting runs and site notes to Anthropic, capped at $0.50, never the pages' visible text or screenshots ([exactly what is sent](docs/claude-code-integration.md#76-privacy-and-data-flows)); `JEV_AUTO_REVIEW=0` in `.env` turns it off.
 
 ## Why it moves
 
@@ -127,6 +127,8 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
 | [mcp_server.py](jev_ultrafast/mcp_server.py) | Claude Code tools: `run_goal` and `report_outcome` |
+| [site_notes.py](jev_ultrafast/site_notes.py) | Failure codes, next steps, and site notes for Claude, never for the executor |
+| [review_runs.py](scripts/review_runs.py) | Reviews of recorded runs, and note approval |
 
 ## Evidence and limits
 
@@ -150,7 +152,7 @@ node --check jev_ultrafast/snapshot.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples, recording scripts, and run reviews make paid API calls; the MCP server may start a review on its own, which `JEV_AUTO_REVIEW=0` turns off. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 
