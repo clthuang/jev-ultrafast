@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from jev_ultrafast import agent as loop
-from jev_ultrafast import model
+from jev_ultrafast import model, site_notes
 from jev_ultrafast.browser import StalePage, browser_operation, fingerprint
 
 
@@ -274,10 +274,82 @@ def test_changed_field_context_does_not_reuse_generated_text(runner, monkeypatch
 
 
 def test_loading_waits_do_not_trigger_no_progress_stop(runner):
-    for _ in range(5):
-        runner.state["decision"] = decision("wait")
+    # Five unchanged steps, never three clicks in a row: a WAIT breaks the no-progress count, and one WAIT stays below
+    # the count that hands the run back to Claude (docs/executor-improvements.md §5).
+    for action in ("e3", "e3", "wait", "e3", "e3"):
+        runner.state["decision"] = decision(action)
         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     assert len(runner.state["history"]) == 5 and runner.state["status"] == "ready"
+
+
+def test_two_unchanged_wait_steps_return_the_run_to_claude(runner):
+    runner.state["decision"] = decision("wait")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready" and runner.state["wait_streak"] == 1
+    runner.state["decision"] = decision("wait")
+    with pytest.raises(ValueError, match=f"^{site_notes.STILL_LOADING_STOP}$"):
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked" and len(runner.state["history"]) == loop.WAITS_BEFORE_CLAUDE
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "a WAIT step that changed the page",
+        "another step that changed the page",
+        "a read before Jev's answer that changed",
+        "a stale answer whose re-read changed",
+        "a failed re-read",
+    ],
+)
+def test_visible_progress_between_waits_restarts_the_count(between, runner, monkeypatch):
+    changed = dict(page(), text="Results")
+    changed["fingerprint"] = fingerprint(changed)
+    runner.state["decision"] = decision("wait")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["wait_streak"] == 1
+    if between in ("a WAIT step that changed the page", "another step that changed the page"):
+        runner.state["browser"].observe.return_value = changed
+        runner.state["decision"] = decision("wait" if between.startswith("a WAIT") else "e3")
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    elif between == "a read before Jev's answer that changed":
+        monkeypatch.setattr(loop, "choose", lambda *_: decision("wait"))
+        runner.state["browser"].fresh.return_value = False  # the page changed after the last step's read
+        runner.state["browser"].observe.return_value = changed
+        runner.command("predict", {})
+        runner.state["browser"].fresh.return_value = True
+    else:
+        monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+        runner.state["browser"].act.side_effect = StalePage("Page changed since this decision. Observe again.")
+        runner.state["browser"].observe.side_effect = (
+            [changed] if between == "a stale answer whose re-read changed" else StalePage("Page did not settle")
+        )
+        runner.command("tick")
+        runner.state["browser"].act.side_effect = runner.state["browser"].observe.side_effect = None
+        runner.state["browser"].observe.return_value = runner.state["page"]
+    assert runner.state["wait_streak"] == 0
+    runner.state["decision"] = decision("wait")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready" and runner.state["wait_streak"] == 1
+
+
+@pytest.mark.parametrize("between", ["a step that changed nothing", "a stale answer whose re-read matches"])
+def test_no_visible_progress_between_waits_keeps_the_count(between, runner, monkeypatch):
+    runner.state["decision"] = decision("wait")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    if between == "a step that changed nothing":  # unchanged clicks and WAITs in turn escape the no-progress stop
+        runner.state["decision"] = decision("e3")
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    else:
+        monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+        runner.state["browser"].act.side_effect = StalePage("Target is covered by <div>. Observe again.")
+        runner.command("tick")  # the re-read matches the read Jev answered on
+        runner.state["browser"].act.side_effect = None
+        assert runner.state["stale_decisions"] == 1
+    assert runner.state["wait_streak"] == 1
+    runner.state["decision"] = decision("wait")
+    with pytest.raises(ValueError, match=site_notes.STILL_LOADING_STOP):
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
 
 
 def test_stale_observation_preserves_executed_action(runner):

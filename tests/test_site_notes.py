@@ -109,6 +109,13 @@ def test_jev_blocked_is_the_blocked_stop():
         assert site_notes.failure_code("blocked", [other_blocked_stop], steps(False)) is None
 
 
+def test_still_loading_is_the_two_wait_stop():
+    # The stop text Agent.command raises after two unchanged WAIT steps (docs/executor-improvements.md §5, D17).
+    assert site_notes.failure_code("blocked", ["Jev judged the page still loading"], steps(False)) == "still_loading"
+    assert site_notes.failure_code("stopped", ["Jev judged the page still loading"], steps(False)) is None
+    assert site_notes.failure_code("blocked", ["Jev answered BLOCKED"], []) == "jev_blocked"
+
+
 def test_busy_after_step_needs_a_timeout_and_an_unfinished_step():
     assert site_notes.failure_code("stopped", [TIMEOUT], steps(None)) == "busy_after_step"
     # The read after the step finished, so the timeout came later.
@@ -154,9 +161,17 @@ def test_every_code_has_a_next_step_sentence():
         "covered_target": "a control kept covering the target, such as an open suggestion list or a password "
         "manager's menu. Give one field or click per goal, starting with controls it does not cover. A goal may "
         "choose the site's suggestion the task needs; never choose an entry from a password manager's menu",
-        "jev_blocked": "Jev answered BLOCKED. If the control may be further down, first run a goal that only scrolls "
-        "until it shows, then the rest. If Jev cannot see it at all, as with a search box inside a shadow DOM or "
-        "frame, open the results URL directly, or use Claude in Chrome",
+        "jev_blocked": "Jev answered BLOCKED. If the screenshot shows the page waiting for the user, such as for a "
+        "sign-in, a passcode, a verification code or a CAPTCHA, call show_window, ask them to finish it there, and "
+        "then continue with run_goal without url. If it shows the page still loading, run a goal for what remains "
+        "without url: Jev answers again on the page as it is then, without reloading it. If Jev's last answer shows a "
+        "runner-up within 0.2 of BLOCKED, that runner-up often names the step to try. If the control may be further "
+        "down, first run a goal that only scrolls until it shows, then the rest. If Jev cannot see it at all, as with "
+        "a search box inside a shadow DOM or frame, open the results URL directly, or use Claude in Chrome",
+        "still_loading": "Jev judged the page still loading, twice, and the page did not change. If the screenshot "
+        "shows it still loading, run a goal for what remains, often just its end state, without url: Jev answers "
+        "again on the page as it is then, without reloading it. Re-ask at most twice. If it waits for the user, call "
+        "show_window. If it looks finished, recover as for Jev answering BLOCKED",
         "busy_after_step": "the page stayed busy after the last step, which ran: check the page before running the "
         "goal again",
     }

@@ -404,3 +404,28 @@ def test_report_prints_reviewer_text_only_inside_a_marked_block(tmp_path, capsys
     assert sum("LOOKALIKE" in line for line in inside) == 1
     # A window that leaves out the excluded run leaves out what cites it too.
     assert not any("LEAK" in line for line in report(capsys, runs, "--artifacts", str(tmp_path), "--since", "1h"))
+
+
+def test_report_counts_same_tab_runs_after_a_jev_stop(tmp_path, capsys):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    opened, continued = {"call": {"url": "https://www.example.com/"}}, {"call": {"url": None}}
+    # A re-ask after a still-loading stop that ends done; a run after show_window that ends done, though the stop was
+    # on a sign-in page on another host, which cuts a chain; a re-ask after a BLOCKED answer that is blocked again,
+    # then a run that opens its url again, which does not count; and a second run linked to that BLOCKED stop, as
+    # after a failed save, which does not count either.
+    first = write_run(runs, 1, "blocked", previous_run=None, failure="still_loading", **opened)
+    second = write_run(runs, 2, labels=[("claude", True)], previous_run=first, failure=None, **continued)
+    sign_in = {"url": "https://accounts.example.net/signin", "text": "", "actions": []}
+    third = write_run(runs, 3, "blocked", previous_run=second, failure="jev_blocked", page=sign_in, **opened)
+    fourth = write_run(runs, 4, labels=[("claude", True)], previous_run=third, failure=None, after_show_window=True,
+                       **continued)
+    fifth = write_run(runs, 5, "blocked", previous_run=fourth, failure="jev_blocked", **opened)
+    sixth = write_run(runs, 6, "blocked", previous_run=fifth, failure="jev_blocked", **continued)
+    write_run(runs, 7, previous_run=sixth, failure=None, **opened)
+    write_run(runs, 8, previous_run=fifth, failure=None, **continued)
+    lines = report(capsys, runs, "--artifacts", str(tmp_path))
+    assert (
+        "same-tab runs after a Jev stop: after jev_blocked 1 (0 done), after show_window 1 (1 done), "
+        "after still_loading 1 (1 done)"
+    ) in lines

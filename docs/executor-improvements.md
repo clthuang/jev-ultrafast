@@ -1,6 +1,6 @@
 # Executor improvements from the Phase 10 comparison
 
-**Status:** nothing is implemented.
+**Status:** §5 is built; §2 and §4 are designed and planned, not built.
 
 - **Round 1** (§1, §2): seven hypotheses, registered on 2026-09-24 at 12:52, before any experiment ran. All ran
   12:55–13:25 the same day.
@@ -21,6 +21,9 @@
   - **waiting for results before DONE:** §4's own, from two runs it flagged (§4.2);
   - **reading controls below the fold and inside shadow DOM:** H1 and H4 again. Both were partly verified, and every
     fix tried failed (§1, Results), so it is held until a new fix idea (plan P32).
+- **Round 3** (§5, v3): when Jev judges a page still loading, the run returns to Claude, which decides what follows
+  (H9). Proposed on 2026-09-29 at the user's request, revised after their review and calvin's questions, built at
+  their request, then independently reviewed, code and docs; no live trial has run.
 
 **Where the problem is:** in the Phase 10 comparison (`docs/performance.md`), 7 of 30 executor sessions needed more than one `run_goal`. They took 57% of all executor session time (951 of 1,680 s), and they include all 4 goals where Claude in Chrome was faster. Jev's own loop was a median 4.0 s of a 32.1 s session.
 
@@ -1954,3 +1957,195 @@ below. They are written and reviewed in the implementation plan, `docs/executor-
   prototype drained every round (cycle-2 review).
 - **Track from the moment the tab opens** (v2): the start page's own requests, a long poll say, could hold the first
   answer to the 5 s cap, which the prototype never did (cycle-2 review).
+
+## 5. Design: when Jev judges a page still loading, Claude decides what follows (H9)
+
+**Status:** v3, built on 2026-09-29. v2 followed the user's review of v1 the same day; v3 answers calvin's 12
+questions (`artifacts/page-readiness-implementation/calvin-s5-close.md`), and the user asked for it to be built.
+Two independent reviews followed, of the code and of the docs (`artifacts/page-readiness-implementation/review-s5.md`);
+their fixes include §5.2's rule that only visible progress restarts the count. The offline tests of §5.5 pass: 14
+new cases in 6 test functions, and a check of `after_show_window` in `show_window`'s test. Two tests changed: the
+WAIT test in `tests/test_agent.py` and the next-step sentences in `tests/test_site_notes.py`. The lab trials of §5.5
+have not run.
+
+- **The request:** "some sort of Jev-retry with backoff (I meant ask Jev again after some time not to reload the
+  page)", after a run on X's messages ended BLOCKED 0.56 s after its start page loaded.
+- **The user's review of v1:** "the previous design (let Jev answer if it's still loading) seems more flexible. Once
+  Jev picks it's loading then Claude can decide what to do next rather than a static reload time." v1 had code
+  re-read the page on a fixed schedule after a BLOCKED answer (§5.4).
+- **v2 in short:** Jev keeps judging whether the page is still loading, through its WAIT answer. Code adds no wait of
+  its own: when waiting in the run does not pay off, or Jev answers BLOCKED, the run returns to Claude with Jev's
+  judgment, and Claude decides whether and when to ask Jev again.
+
+### 5.1 The evidence
+
+These are all 7 runs in `artifacts/runs` that ended on Jev's BLOCKED answer: the 6 public runs of 2026-09-24, and the
+user's X run of 2026-09-29, a private run named here by its site only. "Answer at" is on the run's clock, which starts
+at Jev's first decision, right after the start page loads and is read.
+
+| Run | Site | Steps | Answer at | BLOCKED · runner-up | WAIT | Known cause |
+| --- | --- | ---: | --- | --- | ---: | --- |
+| `20260924-110859-1ba9` | apod.nasa.gov | 0 | 0.62 s | 0.73 · SCROLL_DOWN 0.21 | 0.00 | control below the fold: the site note says scroll first |
+| `20260924-111127-8224` | developer.mozilla.org | 0 | 1.17 s | 0.82 · SCROLL_DOWN 0.09 | 0.04 | search box inside shadow DOM: the site note starts at the search URL |
+| `20260924-111150-69f5` | developer.mozilla.org | 0 | 0.64 s | 0.90 · CLICK 0.04 | 0.03 | the same |
+| `20260924-111225-096c` | developer.mozilla.org | 0 | 0.68 s | 0.76 · CLICK 0.16 | 0.07 | the same |
+| `20260924-112406-f39e` | arxiv.org | 1 | 2.55 s, 0.63 s after its input | 0.63 · CLICK 0.18 | 0.03 | date fields below the fold: the site note says scroll first |
+| `20260924-112421-fc87` | arxiv.org | 0 | 0.98 s | 0.55 · SCROLL_DOWN 0.42 | 0.00 | the same |
+| the X run (private) | x.com | 0 | 0.56 s, after a choice went stale at 0.32 s | 0.50 · CLICK 0.48 | 0.02 | messages locked until the user creates a passcode |
+
+What it shows:
+
+- **Six answers were right about a page that does not change on its own.** Their causes are what the site notes now
+  record. Claude recovered each by scrolling first or by starting at a results URL, never by waiting.
+- **Jev's loading answer, WAIT, got at most 0.07 at these answers.** Its instruction already allows WAIT when "the
+  needed control is absent" (`questions.py`), X's case, yet Jev chose BLOCKED, at 0.50 against CLICK's 0.48.
+- **Where Jev did answer WAIT, waiting worked.** 3 of the 76 public runs had a WAIT step, each a single one that left
+  the page unchanged. The page then changed while Jev answered again: in each run the next 2 or 3 answers went stale,
+  a second WAIT among them in two runs, and a DONE stood 1.1–1.7 s after the WAIT. No run had two WAIT steps in a
+  row.
+- **Before §5, a run of WAITs had no stop of its own.** WAIT sleeps 100 ms, then Jev answers again, and WAIT steps
+  are exempt from the "three actions in a row changed nothing" stop. A page Jev kept calling loading would have run
+  to the 60-action budget, about 27 s at the 0.43–0.45 s each recorded WAIT step took, with Claude never asked. No
+  recorded run did.
+- **X's page was still settling.** Read with no Jev call on 2026-09-29, its read had changed by 0.26 s after load and
+  again by 2.0 s in a window behind the user's, and by 0.5 s and 1.5 s in a window in front.
+- **Waiting would not have saved the X run.** Its messages were locked behind a passcode only the user can create, a
+  case for `show_window` (`docs/failure-review.md` §5). The passcode screen, which the screenshot showed, never entered
+  a read. X renders its chat in an iframe at `/i/chat`, and the read does not traverse frames (`docs/performance.md`,
+  Limits): the likely reason, which cannot be checked, since X no longer shows the screen.
+
+So where Jev answered WAIT, waiting in the run worked. Where it answered DONE on a page still loading, as in 3 of the 76
+public runs (§4.2), §4's wait applies. Where it answered BLOCKED on a page still settling, as on X, Claude saw neither
+that the page was changing nor that Jev's answer was a near tie. And a run of WAITs had no stop of its own.
+
+### 5.2 The change
+
+1. **Jev's WAIT stays its "still loading" answer.** The first WAIT still sleeps 100 ms, and Jev answers again, as in
+   all 3 recorded cases.
+2. **Two WAIT steps, each leaving the page unchanged, with no visible progress between them, return the run to
+   Claude:** status `blocked`, the stop note "Jev judged the page still loading", failure code `still_loading`.
+   - **Visible progress restarts the count:** a read that differs from the one before, whether after a step,
+     before Jev answers or after a stale answer, and a re-read that fails because the page is still navigating.
+   - **Nothing else does.** A step other than WAIT that changed nothing leaves the count as it is, so unchanged
+     clicks and WAITs in turn, which the "three actions in a row changed nothing" stop never sees, end here too.
+     So does a stale answer whose re-read matches: nothing ran, and the page reads the same. It adds one to the
+     stale streak instead (`Agent.command`).
+   - **A target covered between the WAITs** ends here too. A covered, covered, WAIT loop, which ran to the decision
+     budget before (`docs/claude-code-integration.md` §10), stops after two rounds as `still_loading`. The code
+     cannot tell a loading overlay over the target from a menu; the screenshot can.
+3. **A result whose stop is Jev's own answer,** "Jev answered BLOCKED" or "Jev judged the page still loading", shows
+   that answer's top three operation probabilities, as `Jev's last answer: BLOCKED 0.50 · CLICK 0.48 · WAIT 0.02`.
+   It is server text: operation names and numbers only. DONE results and other stops do not show it.
+4. **The server records whether `show_window` ran before a run,** as the run file's `after_show_window`, so the report
+   can tell a re-ask from a continuation after the user acted (D20).
+5. **Claude decides what follows,** from the stop's screenshot, the only view of the tab between runs, with the next
+   step's options (D18):
+   - **The page still looks loading,** a spinner or an empty results area say: run a goal for what remains, often
+     just its end state, without url. Claude's own turn takes seconds, so the page has had time. Jev answers again on
+     the page as it is then, without reloading it, and the result brings a fresh read and screenshot. At most two
+     re-asks for one sub-goal; after that, the page counts as stuck.
+   - **Jev's answer was close,** a runner-up within 0.2 of it: the runner-up often names the step to try. On arXiv,
+     BLOCKED 0.55 against SCROLL_DOWN 0.42, the fix was to scroll first.
+   - **The page waits for the user:** `show_window`.
+   - **The page looks finished:** recover as for a blocked control: scroll first, start at a results URL, or use
+     Claude in Chrome.
+
+- **A re-ask on an unchanged page gets the same answer** (§5.4), so re-asking is advised only when the screenshot shows
+  the page still loading.
+- **Why a goal for what remains, not the same goal:** a new run starts with no history, so the same goal could repeat
+  steps that already ran. Jev's rule "Submit populated search fields" could re-submit a search. The commit boundary
+  still stops an irreversible repeat.
+- **No timer is added.** The only wait in code is WAIT's existing 100 ms. Claude's own turn is the backoff, and Claude
+  chooses it.
+- **The user's rule of 2026-09-25** (§4.1) holds: code acts on what it sees, a page that did not change; Jev judges
+  whether it is loading; Claude judges what to do next.
+
+**Why two WAIT steps.** Two do not show that waiting has stopped paying off; they bound how long a run waits without
+Claude. The user asked for Claude to decide once Jev judges the page loading (2026-09-29). A pause like X's, whose read
+changed at 0.26 s and then not until 1.5–2.0 s, hands back early, at the cost of one Claude turn, whose own seconds
+usually outlast the pause, so the re-ask reads the settled page. D20's second rule raises the count if early hand-backs
+mostly pass at their first re-ask.
+
+**What it solves.** Without the hand-back, a page Jev keeps calling loading runs to the 60-action budget, about 27 s at
+the 0.43–0.45 s each recorded WAIT step took, and ends with no failure code and no named recovery. No recorded run
+did, so this part is a safeguard. The recorded problem is the other half: 2 of the 7 BLOCKED answers were close calls,
+arXiv's 0.55 against 0.42 and X's 0.50 against 0.48, and Claude could not see it.
+
+**Its cost:** none on the recorded runs. None had more than one WAIT step, and the probabilities add one line to a
+result that ended on Jev's answer. A page Jev twice calls loading costs one Claude turn, instead of up to 60 WAITs.
+
+**Where it cannot help:** loading that Jev's read does not show, such as X's passcode screen inside a frame. Claude
+has the screenshot there.
+
+### 5.3 Decisions
+
+| # | Decision | Why | Where to change it |
+| --- | --- | --- | --- |
+| D15 | Jev's WAIT is its "still loading" answer; Jev gets no new question | WAIT exists, and its instruction already covers X's absent control. A separate loading question has no recorded case where it would have helped: X's read showed a finished page | `questions.py` |
+| D16 | Two WAIT steps, each leaving the page unchanged, with no visible progress between them, return the run to Claude. The count follows §5.2's item 2 | No recorded run had two: after each single WAIT step the page changed, and a DONE stood within 1.7 s. Before it, no stop applied to WAITs, nor to unchanged clicks and WAITs in turn. A step that changed nothing is no progress, so it keeps the count (the code review, 2026-09-29) | `WAITS_BEFORE_CLAUDE` in `agent.py` |
+| D17 | That stop is `blocked`, with the note "Jev judged the page still loading" and the failure code `still_loading` | Claude's recovery differs from a BLOCKED answer's: the page may be ready by the time Claude looks | `agent.py`; `FAILURE_RULES` in `site_notes.py`; `docs/failure-review.md` §4 and §5 |
+| D18 | `still_loading` gets its own next step, and `jev_blocked`'s gains the re-ask and the runner-up, both below | Claude decides; the sentences name its options, as the other codes' do | `NEXT_BY_FAILURE` in `site_notes.py`, verbatim in `docs/failure-review.md` §5 |
+| D19 | A result whose stop is Jev's own answer shows that answer's top three operation probabilities | Claude can tell a near tie, X's 0.50 against 0.48, from a sure answer, MDN's 0.90 | `render()` in `mcp_server.py` |
+| D20 | The report counts the runs that continue in the same tab after a `jev_blocked` or `still_loading` stop, by that code and by `after_show_window`, with how many ended done | It shows whether the re-asks and the hand-back pay for themselves. Two rules: if 20 re-asks bring no done, drop the re-ask from the next steps; if more than half of the first 20 `still_loading` stops are followed by a re-ask that ends done, raise `WAITS_BEFORE_CLAUDE` | `scripts/report_runs.py` |
+
+- **`still_loading`'s next step:** "Jev judged the page still loading, twice, and the page did not change. If the
+  screenshot shows it still loading, run a goal for what remains, often just its end state, without url: Jev answers
+  again on the page as it is then, without reloading it. Re-ask at most twice. If it waits for the user, call
+  show_window. If it looks finished, recover as for Jev answering BLOCKED".
+- **`jev_blocked`'s additions,** after the show_window sentence: "If it shows the page still loading, run a goal for
+  what remains without url: Jev answers again on the page as it is then, without reloading it. If Jev's last answer
+  shows a runner-up within 0.2 of BLOCKED, that runner-up often names the step to try."
+
+### 5.4 Alternatives not taken
+
+- **v1: watch the page on a schedule after a BLOCKED answer.** Code read the page 0.5, 1.5 and 3.5 s after the answer,
+  and asked Jev again at the first change. A static schedule in code: the user preferred Jev's judgment and Claude's
+  decision (2026-09-29).
+- **Ask Jev again after each wait, whatever the page shows:** on an unchanged page Jev gets the same read and repeats
+  its answer.
+- **Return to Claude at every WAIT:** each of the 3 recorded WAITs was followed by a DONE that stood within 1.7 s, in
+  the run. Returning would have cost each a Claude turn.
+- **Re-ask with the same goal:** it could repeat steps that already ran (§5.2).
+- **Restart the count at any step other than WAIT,** as first built: unchanged clicks and WAITs in turn then
+  escaped every stop and ran to the 60-action budget, as the code review found.
+- **Ask Jev a separate yes/no "is the page still loading?" question,** in the same request as its operation: X's read
+  showed a finished page, so no recorded answer would have changed. Worth a trial if `still_loading` stops or re-asks
+  show Jev missing loading pages.
+- **Tell Jev to prefer WAIT over BLOCKED when unsure:** WAIT's instruction already covers an absent control, and a
+  change to every run's instructions needs trials first.
+- **Treat an uncertain BLOCKED as WAIT in code:** a threshold with no data behind it. Claude sees the probabilities
+  instead (D19).
+- **Give Jev the previous runs' actions** (user's question, 2026-09-29): none of the 18 continuation runs among the 76
+  public runs repeated or undid an earlier action, and none of their 6 blocks traced to missing context. Held until a
+  replay and a lab trial show a gain.
+
+### 5.5 How it is verified
+
+- **Offline tests, with a scripted Jev and a fake page:**
+  1. two WAIT steps in a row, each leaving the page unchanged: the run stops with "Jev judged the page still loading",
+     status `blocked`;
+  2. visible progress between two WAIT steps, a WAIT step or another step that changed the page, a read before Jev
+     answers that changed, a stale answer whose re-read changed, or a failed re-read: the run goes on;
+  3. no visible progress between them, a step that changed nothing or a stale answer whose re-read matches: the
+     run stops;
+  4. WAIT steps still never trigger the no-progress stop;
+  5. the server's result for that stop: failure code `still_loading`, its next step, and Jev's last answer;
+  6. a result that ends on BLOCKED shows its top three operation probabilities, outside the untrusted block, and a
+     DONE result or another stop does not;
+  7. both next steps verbatim from `docs/failure-review.md` §5;
+  8. `after_show_window` in the next run's file after `show_window`;
+  9. the report's continuation counts, including a run after a sign-in on another host.
+- **In a lab Chrome, with real Jev,** a few cents of calls, registered before the trials:
+  - **A page whose needed control appears 1.5 s after load:** two unchanged WAIT steps take about 0.9 s from the
+    first answer, so each trial's first run is expected to stop `still_loading`, and its first re-ask, a goal for what
+    remains, to end done: at least 9 of 10 sub-goals done within one re-ask.
+  - **A page whose results never arrive:** every run stops `still_loading`, and the second re-ask is the last.
+- **In real use:** the report's counts and D20's two rules.
+
+### 5.6 Not in this change
+
+- **Pages waiting for the user,** such as a sign-in or a passcode: Claude brings the window up with `show_window`
+  (`docs/failure-review.md` §5).
+- **Controls below the fold or inside shadow DOM:** H1 and H4, held (plan P32).
+- **Content inside frames,** as X's chat likely was: the read does not traverse them (`docs/performance.md`, Limits).
+- **A DONE answered before the start page settles:** §4.7's excluded case.

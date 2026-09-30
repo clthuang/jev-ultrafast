@@ -322,7 +322,7 @@ Read first:
   - Create `SERVER = MCPServer("jev-ultrafast", instructions=INSTRUCTIONS)` and register `run_goal` and `report_outcome` with `@SERVER.tool()`.
   - `main()` calls `SERVER.run()`, and the file ends with `if __name__ == "__main__": main()`. Nothing touches Chrome at import time.
   - **Check 1:** `uv run python -c "from jev_ultrafast.mcp_server import INSTRUCTIONS as I; assert len(I) <= 1500, len(I)"` → exit 0.
-  - **Check 2:** `uv run pytest -q -k test_stdio_lists_both_tools` → `1 passed`.
+  - **Check 2:** `uv run pytest -q -k test_stdio_lists_every_tool` → `1 passed`.
     - The test starts `sys.executable -m jev_ultrafast.mcp_server` and sends `initialize` with `protocolVersion "2025-06-18"`, then `notifications/initialized`, then `tools/list`.
     - It asserts `run_goal` and `report_outcome` are listed, then kills the process.
   - **Check 3:** `uv run pytest -q -k test_import_does_not_touch_chrome` → `1 passed`. It reloads `jev_ultrafast.mcp_server` with `browser.ensure_daemon` and `browser.cdp` replaced by mocks, and asserts neither was called.

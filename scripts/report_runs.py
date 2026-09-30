@@ -29,6 +29,7 @@ from jev_ultrafast.site_notes import (  # noqa: E402
     excluded,
     failure_code,
     instructions_line,
+    links,
     load,
     note_excluded,
     possible_false_dones,
@@ -198,7 +199,8 @@ def ranked(counts):
 
 
 def run_lines(runs, rows):
-    """Failure codes, then each site's; stale-budget stops; runs per sub-goal; possible false DONEs (design §9)."""
+    """Failure codes, then each site's; stale-budget stops; runs per sub-goal; same-tab runs after a Jev stop;
+    possible false DONEs (design §9)."""
     lines, sites = [], {}
     for row in rows:
         if row["failure"]:
@@ -210,9 +212,34 @@ def run_lines(runs, rows):
     if stale := sum(row["stale_budget"] for row in rows):
         lines.append(f"stale-budget stops: {stale}")
     lines += chain_lines(runs)
+    lines += continuation_lines(runs, rows)
     if false_dones := possible_false_dones(runs):
         lines += [f"possible false DONEs: {len(false_dones)}", "  " + ", ".join(false_dones)]
     return lines
+
+
+def continuation_lines(runs, rows):
+    """The runs that continue in the same tab after a jev_blocked or still_loading stop: grouped by that code, or by
+    show_window when the user acted first, with how many ended done (docs/executor-improvements.md §5, decision D20).
+
+    It follows each run's link, not the chains, which a sign-in on another host would cut; only the first run linked
+    to a stop counts, as in possible_false_dones. Only a run whose call is recorded can continue: runs and rows are
+    appended together, so they pair up in order."""
+    failures = {run_id: row["failure"] for run_id, row in zip(runs, rows)}
+    counts, done, followed = Counter(), Counter(), set()
+    for run_id, link in links(runs).items():
+        if link is None or link in followed:
+            continue
+        followed.add(link)  # only the next run counts
+        run, call = runs[run_id], runs[run_id].get("call")
+        if failures.get(link) in ("jev_blocked", "still_loading") and call and call.get("url") is None:
+            group = "show_window" if run.get("after_show_window") else failures[link]
+            counts[group] += 1
+            done[group] += (run.get("result") or {}).get("status") == "done"
+    if not counts:
+        return []
+    groups = ", ".join(f"after {group} {n} ({done[group]} done)" for group, n in sorted(counts.items()))
+    return [f"same-tab runs after a Jev stop: {groups}"]
 
 
 def chain_lines(runs):

@@ -12,18 +12,20 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 STALE_STREAK_STOP = "Three choices in a row went stale while the page read stayed the same:"  # Agent.command
 NAMED_COVER = "Target is covered by <"  # browser_operation's stale message, naming the element over the target
 JEV_BLOCKED_STOP = "Jev answered BLOCKED"  # start_run
+STILL_LOADING_STOP = "Jev judged the page still loading"  # Agent.command
 BUDGET_STOP = "Reached the demo's model-call budget"  # Agent.command
 # browser-harness's timeout, as in "Runtime.evaluate timed out after 5s waiting for the daemon" (helpers.py, _send).
 HARNESS_TIMEOUT = re.compile(r"[\w.]+ timed out after [\d.]+s")
 
 # Each rule reads the run's status and its first stop note, the stop reason; later notes, such as "fresh read
 # failed: …", are not. A rule matches server text from the note's start, so page text quoted in a note can at worst
-# pick the wrong one of three fixed sentences. Their statuses and texts differ, so a run matches one rule at most.
+# pick the wrong one of four fixed sentences. Their statuses and texts differ, so a run matches one rule at most.
 FAILURE_RULES = {
     "covered_target": lambda status, note, last_step: (
         status == "blocked" and note.startswith(STALE_STREAK_STOP) and NAMED_COVER in note
     ),
     "jev_blocked": lambda status, note, last_step: status == "blocked" and note == JEV_BLOCKED_STOP,
+    "still_loading": lambda status, note, last_step: status == "blocked" and note == STILL_LOADING_STOP,
     # The read after the last step timed out: the step ran, and its page_changed is still None.
     "busy_after_step": lambda status, note, last_step: (
         status == "stopped"
@@ -32,15 +34,24 @@ FAILURE_RULES = {
         and last_step["page_changed"] is None
     ),
 }
-# Delegated decision D8 (docs/failure-review.md §11): three failure codes, each with a sentence.
+# Delegated decision D8 (docs/failure-review.md §11): each failure code has a sentence. still_loading came later, with
+# decision D17 (docs/executor-improvements.md §5).
 # Verbatim from docs/failure-review.md §5. With a failure code, the result's next: line names its recovery.
 NEXT_BY_FAILURE = {
     "covered_target": "a control kept covering the target, such as an open suggestion list or a password manager's "
     "menu. Give one field or click per goal, starting with controls it does not cover. A goal may choose the site's "
     "suggestion the task needs; never choose an entry from a password manager's menu",
-    "jev_blocked": "Jev answered BLOCKED. If the control may be further down, first run a goal that only scrolls until "
-    "it shows, then the rest. If Jev cannot see it at all, as with a search box inside a shadow DOM or frame, open the "
-    "results URL directly, or use Claude in Chrome",
+    "jev_blocked": "Jev answered BLOCKED. If the screenshot shows the page waiting for the user, such as for a "
+    "sign-in, a passcode, a verification code or a CAPTCHA, call show_window, ask them to finish it there, and then "
+    "continue with run_goal without url. If it shows the page still loading, run a goal for what remains without url: "
+    "Jev answers again on the page as it is then, without reloading it. If Jev's last answer shows a runner-up within "
+    "0.2 of BLOCKED, that runner-up often names the step to try. If the control may be further down, first run a goal "
+    "that only scrolls until it shows, then the rest. If Jev cannot see it at all, as with a search box inside a "
+    "shadow DOM or frame, open the results URL directly, or use Claude in Chrome",
+    "still_loading": "Jev judged the page still loading, twice, and the page did not change. If the screenshot shows "
+    "it still loading, run a goal for what remains, often just its end state, without url: Jev answers again on the "
+    "page as it is then, without reloading it. Re-ask at most twice. If it waits for the user, call show_window. "
+    "If it looks finished, recover as for Jev answering BLOCKED",
     "busy_after_step": "the page stayed busy after the last step, which ran: check the page before running the goal "
     "again",
 }

@@ -127,6 +127,7 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "AGENT", None)
     monkeypatch.setattr(mcp_server, "PREVIOUS_RUN", None)
     monkeypatch.setattr(mcp_server, "SHOWN_NOTES", set())
+    monkeypatch.setattr(mcp_server, "WINDOW_SHOWN", False)
     monkeypatch.setattr(anyio.from_thread, "check_cancelled", lambda: None)
     monkeypatch.setattr(mcp_server.time, "monotonic", lambda: CLOCK[0])
     CLOCK[0] = 0.0
@@ -445,6 +446,62 @@ def test_a_watched_run_brings_its_window_forward_before_its_first_step(url, fore
     assert mcp_server.AGENT.state["call"]["foreground_window"] is foreground_window
 
 
+def test_show_window_brings_the_open_tab_forward_and_runs_nothing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mcp_server, "cdp", lambda method, **params: calls.append((method, params)) or {})
+    assert mcp_server.show_window() == mcp_server.NO_TAB and calls == []  # no run has opened a tab yet
+    STEPS[:] = [done]
+    mcp_server.run_goal("Search", url=URL)
+    runs = sorted(Path("artifacts/runs").glob("*.json"))
+    reply = mcp_server.show_window()
+    assert reply.startswith("shown: ") and "Never ask for the secret in chat" in reply  # the instructions leave it out
+    assert calls == [("Target.activateTarget", {"targetId": "T1"})]
+    assert sorted(Path("artifacts/runs").glob("*.json")) == runs and STEPS == []  # no run, no Jev call
+    for after_show_window in (True, False):  # only the next run records it (executor-improvements.md D20)
+        STEPS[:] = [done]
+        mcp_server.run_goal("Search again")
+        assert mcp_server.AGENT.state["after_show_window"] is after_show_window
+    monkeypatch.setattr(mcp_server, "cdp", raises(RuntimeError("No target with given id found")))  # tab closed
+    assert mcp_server.show_window() == f"{mcp_server.NO_TAB} (No target with given id found)"
+    assert mcp_server.WINDOW_SHOWN is False
+
+
+@pytest.mark.parametrize(
+    ("ending", "failure", "answer_line"),
+    [
+        ("BLOCKED", "jev_blocked", "Jev's last answer: BLOCKED 0.50 · CLICK 0.48 · WAIT 0.02"),
+        ("WAIT", "still_loading", "Jev's last answer: WAIT 0.80 · DONE 0.15 · CLICK 0.05"),
+        ("DONE", None, None),
+        ("CLICK", None, None),  # a stop that is not Jev's own answer: the commit boundary
+    ],
+)
+def test_a_run_that_stops_on_jevs_answer_shows_how_sure_jev_was(ending, failure, answer_line):
+    probabilities = {
+        "BLOCKED": {"BLOCKED": 0.5, "CLICK": 0.48, "WAIT": 0.02, "DONE": 0.0},
+        "WAIT": {"WAIT": 0.8, "DONE": 0.15, "CLICK": 0.05, "BLOCKED": 0.0},
+        "DONE": {"DONE": 0.9, "CLICK": 0.1},
+        "CLICK": {"CLICK": 0.9, "DONE": 0.1},
+    }[ending]
+
+    def answer(agent):
+        agent.state["decisions"].append({"operation": ending, "operation_probabilities": probabilities, "usage": {}})
+        agent.state["status"] = "done" if ending == "DONE" else "blocked"
+        if ending == "WAIT":  # Agent.command's stop at a second unchanged WAIT (D17)
+            raise ValueError(site_notes.STILL_LOADING_STOP)
+        if ending == "CLICK":
+            raise ValueError("'Pay' may pay, buy, book, send, delete, or change account settings")
+
+    STEPS[:] = [answer]
+    [text, _image] = mcp_server.run_goal("Search", url=URL)
+    lines = text.splitlines()
+    assert run_file()["failure"] == failure
+    if failure:
+        assert lines[1] == f"next: {site_notes.NEXT_BY_FAILURE[failure]}"
+        assert lines[2] == answer_line and lines[3].startswith("<untrusted page content ")  # outside the block
+    else:
+        assert not any(line.startswith("Jev's last answer") for line in lines)
+
+
 def render_state(steps=0, actions=(), attempt=None):
     return {
         "page": {"url": URL + "results", "title": "Results", "text": "Visible words. " * 400, "actions": list(actions)},
@@ -633,6 +690,11 @@ def test_server_instructions_list_the_approved_notes(monkeypatch):
     monkeypatch.setenv("JEV_LEARNING", "")  # so the .env line below applies, then is restored
     Path(".env").write_text("JEV_LEARNING=0\n")
     assert mcp_server.build_server().instructions == mcp_server.INSTRUCTIONS
+
+
+def test_instructions_leave_room_for_the_notes_line_within_1500_characters():
+    # Claude Code truncates server instructions near 2,000 characters (docs/claude-code-integration.md §6.4).
+    assert len(mcp_server.INSTRUCTIONS) + len("\n") + site_notes.INSTRUCTION_NOTES_CHARACTERS <= 1500
 
 
 def test_import_reads_no_env_and_no_notes(monkeypatch):
@@ -920,12 +982,12 @@ def handshake(process):
     request(process, {"method": "notifications/initialized"})
 
 
-def test_stdio_lists_both_tools(tmp_path):
+def test_stdio_lists_every_tool(tmp_path):
     process = start_server(tmp_path)
     try:
         handshake(process)
         tools = request(process, {"id": 2, "method": "tools/list"})["result"]["tools"]
-        assert {"run_goal", "report_outcome"} <= {tool["name"] for tool in tools}
+        assert {"run_goal", "report_outcome", "show_window"} <= {tool["name"] for tool in tools}
     finally:
         process.kill()
         process.wait()

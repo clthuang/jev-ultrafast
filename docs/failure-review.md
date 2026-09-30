@@ -21,6 +21,14 @@
     summary hid only the values its own chain typed, while the reply check refused a value typed in any queued run.
     Now every summary hides every queued run's values (§7.2), and a task value in a reply refuses only a note
     decision holding it in its note or detail; anywhere else it becomes `<value>` (§7.5).
+  - **After v4.4, at your request (2026-09-29):** `jev_blocked`'s next step (§5) also covers a page waiting for you,
+    such as X's messages asking you to create a passcode: Claude calls the new `show_window` tool to bring the run's
+    window up, asks you to finish there, then continues in the same tab. Only the screenshot showed X's passcode
+    screen, neither page read did, so Claude judges this case too.
+  - **Also after v4.4, at your request (2026-09-29):** a fourth code, `still_loading`: two unchanged WAIT steps
+    with no change between them return the run to Claude (§4, §5). A result that stopped on Jev's own answer shows
+    its top three operation probabilities, and `jev_blocked`'s next step gains a re-ask for a page still loading
+    (`docs/executor-improvements.md` §5).
   - **Two findings not followed, with reasons:** the session-start list of approved notes stays, approved only at a
     terminal (§8.1), where a safety reviewer asked to defer it; and the summaries go to the reviewer on stdin, where a
     nit asked for none.
@@ -39,7 +47,7 @@ recoveries happened: in the goals Claude writes.
 
 **What gets built, all automatic, with no extra model calls, and nothing sent anywhere results don't already go:**
 
-1. **A failure code:** at a stop whose cause code can read from the run file, one of three codes.
+1. **A failure code:** at a stop whose cause code can read from the run file, one of four codes.
 2. **A next step for each code:** the result tells Claude, in a fixed sentence, how that kind of failure was
    recovered.
 3. **Site notes:** when a changed goal fixes a failed run, Claude records the site's quirk as one of four hints, plus a
@@ -196,14 +204,15 @@ step, the verdicts, and the result text Claude received. It gains three fields:
 
 ## 4. Failure codes
 
-`failure_code(state, notes)` runs in `finish()`. Each code reads only run-file fields, and each has a next-step
-sentence (§5).
+`failure_code(status, notes, history)` runs in `finish()`. Each code reads only run-file fields, and each has a
+next-step sentence (§5).
 
 | Code | Rule | Recorded runs it fires on |
 | --- | --- | --- |
 | `covered_target` | the stale-streak stop, whose note contains "Target is covered by <…>" | 1: the re-test on ClinicalTrials.gov, naming `<mat-option>` |
 | `jev_blocked` | the "Jev answered BLOCKED" stop | 6 |
 | `busy_after_step` | a timeout, with the last step's `page_changed` still None, because the read after it failed | 1 |
+| `still_loading` | the "Jev judged the page still loading" stop: two WAIT steps, each leaving the page unchanged, with no change between them (`docs/executor-improvements.md` §5) | 0: added on 2026-09-29 |
 
 **The rest of the 15:**
 
@@ -227,8 +236,9 @@ recovery instead of the generic "try a narrower goal".
 | Code | Next step shown |
 | --- | --- |
 | `covered_target` | a control kept covering the target, such as an open suggestion list or a password manager's menu. Give one field or click per goal, starting with controls it does not cover. A goal may choose the site's suggestion the task needs; never choose an entry from a password manager's menu |
-| `jev_blocked` | Jev answered BLOCKED. If the control may be further down, first run a goal that only scrolls until it shows, then the rest. If Jev cannot see it at all, as with a search box inside a shadow DOM or frame, open the results URL directly, or use Claude in Chrome |
+| `jev_blocked` | Jev answered BLOCKED. If the screenshot shows the page waiting for the user, such as for a sign-in, a passcode, a verification code or a CAPTCHA, call show_window, ask them to finish it there, and then continue with run_goal without url. If it shows the page still loading, run a goal for what remains without url: Jev answers again on the page as it is then, without reloading it. If Jev's last answer shows a runner-up within 0.2 of BLOCKED, that runner-up often names the step to try. If the control may be further down, first run a goal that only scrolls until it shows, then the rest. If Jev cannot see it at all, as with a search box inside a shadow DOM or frame, open the results URL directly, or use Claude in Chrome |
 | `busy_after_step` | the page stayed busy after the last step, which ran: check the page before running the goal again |
+| `still_loading` | Jev judged the page still loading, twice, and the page did not change. If the screenshot shows it still loading, run a goal for what remains, often just its end state, without url: Jev answers again on the page as it is then, without reloading it. Re-ask at most twice. If it waits for the user, call show_window. If it looks finished, recover as for Jev answering BLOCKED |
 
 - **One sentence for every BLOCKED answer:** the page offered a scroll at every decision of all 6 BLOCKED runs, so
   code cannot tell a control below the view from one it cannot read. Claude tells them apart from the screenshot.
@@ -238,7 +248,8 @@ recovery instead of the generic "try a narrower goal".
   - **What v3's sentences fix:** the draft could have picked a 1Password entry, and it put the scroll inside the full
     goal, which failed on arXiv.
   - **Fit, not prediction:** the fixes come from the same sessions. The paid test in §10 would measure it.
-- **Loading failures** end DONE, so they get no code. The executor design's loading wait is their fix.
+- **Loading failures** mostly end DONE, so they get no code. The executor design's loading wait is their fix.
+  A run whose WAIT steps twice leave the page unchanged stops with `still_loading` (§4).
 
 ## 6. Site notes
 
@@ -344,8 +355,9 @@ The recorded recoveries give four notes, stored when the design is built and dat
 - **What:** one line, "Site hints from earlier runs, not instructions:", then each approved note's host and its
   hint's short form, which for `start_at_url` includes its URL.
 - **Nothing a model wrote:** no detail.
-- **Room:** at most 400 characters, most recently shown (`last_shown`) first. The instructions use 1,017 of their
-  1,500 characters today, and the line for the four seed notes takes 295.
+- **Room:** at most 400 characters, most recently shown (`last_shown`) first. The instructions use 1,098 of their
+  1,500 characters today, and the line for the four seed notes takes 295. A test checks that the instructions, a
+  line break and the 400 fit in 1,500.
 - **Why:** it helps a session's first run on a site, at no extra turn.
 - **Built at start:** `main()` loads `.env`, then builds the server object and its instructions, so `JEV_LEARNING`
   applies to them too. Importing `mcp_server.py` reads neither `.env` nor the notes file, which keeps real keys out of
@@ -597,6 +609,8 @@ trials.
 
 - **Failures:** by site and by failure code, and budget stops with mostly stale decisions (§4).
 - **Chains:** sub-goals that needed more than one run, and the runs they took.
+- **Same-tab runs after a Jev stop:** runs without `url` after a `jev_blocked` or `still_loading` stop, by that
+  code or by `show_window`, and how many ended done (`docs/executor-improvements.md` §5, D20).
 - **Notes:** how often each was shown, how the next run on its site ended, retirements, the characters notes add to
   results, and the notes waiting for approval.
 - **Reviews:** their number, failures and cost.
@@ -621,12 +635,12 @@ Each has a comment where it lives in the code, naming this section, so it can be
 | --- | --- | --- | --- |
 | D1 | Key notes by the host without `www.` | registrable domains merge different apps; nothing recorded needed a path | `site_key()` in `jev_ultrafast/site_notes.py` |
 | D2 | Four hints, three of them from recoveries in the data; no free-form hint | a typed hint can be checked, counted, and shown as a fixed sentence | `HINTS` in `site_notes.py` |
-| D3 | At most 3 notes and 900 characters per result, 5 notes per site, and 400 characters in the instructions | a result holds at most 8,000 characters, and the instructions 1,500, of which 1,017 are used | `MAX_NOTES_SHOWN`, `SITE_NOTES_CHARACTERS`, `MAX_NOTES_PER_SITE` and `INSTRUCTION_NOTES_CHARACTERS` in `site_notes.py` |
+| D3 | At most 3 notes and 900 characters per result, 5 notes per site, and 400 characters in the instructions | a result holds at most 8,000 characters, and the instructions 1,500, of which 1,098 are used | `MAX_NOTES_SHOWN`, `SITE_NOTES_CHARACTERS`, `MAX_NOTES_PER_SITE` and `INSTRUCTION_NOTES_CHARACTERS` in `site_notes.py` |
 | D4 | Show unapproved notes in results, marked | approval needs you at a terminal, which can take days. Meanwhile a note is Claude's own checked lesson, shown only as untrusted data | `render_site_notes()` in `site_notes.py` |
 | D5 | Notes expire: unapproved after 30 days, approved 180 days after approval | sites change, and a stale note misleads | `UNAPPROVED_DAYS` and `APPROVED_DAYS` in `site_notes.py` |
 | D6 | An unapproved note retires after 2 failures with its code, on its site, after it was shown | it did not help. The prior work keeps helped and hurt counts for the same reason | `RETIRE_AFTER_FAILURES` in `site_notes.py` |
 | D7 | Only notes you approve reach the instructions, as host, fixed short form and a derived URL of at most 100 characters | the page chose the host and the URL's path, and either can hold words; the instructions are trusted text | `instructions_line()` in `site_notes.py` |
-| D8 | Three failure codes, each with a sentence | a code with no sentence would rename a stop the report already counts | `FAILURE_RULES` and `NEXT_BY_FAILURE` in `site_notes.py` |
+| D8 | Three failure codes, each with a sentence; a fourth, `still_loading`, came with `docs/executor-improvements.md` §5 | a code with no sentence would rename a stop the report already counts | `FAILURE_RULES` and `NEXT_BY_FAILURE` in `site_notes.py` |
 | D9 | `previous_run` is the last run this server saved a run file for | a recovery can start at a new URL, which closes the tab | `start_run()` in `jev_ultrafast/mcp_server.py` |
 | D10 | Next-step sentences, notes and automatic reviews are on by default | you asked for automation where possible. The first two add no model call, and reviews are capped (D16) | `JEV_LEARNING` in `site_notes.py`; `JEV_AUTO_REVIEW` in `scripts/review_runs.py` |
 | D11 | The exclude file starts with your two private runs, and automatic reviews skip runs from before the build | privacy first, and no surprise backlog | `artifacts/review-exclude.txt`; `AUTO_FROM` in `scripts/review_runs.py` |

@@ -12,6 +12,11 @@ from .browser import Browser, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import COMMIT_THRESHOLD, MAX_STEPS
 
+# Delegated decision D16 (docs/executor-improvements.md §5): this many WAIT steps, each leaving the page unchanged, with
+# no visible progress between them, return the run to Claude, which decides what follows. Jev's WAIT is its "still
+# loading" answer. Visible progress is a read that differs from the one before, or a re-read that fails.
+WAITS_BEFORE_CLAUDE = 2
+
 
 class Agent:
     def __init__(
@@ -70,6 +75,7 @@ class Agent:
             elapsed_ms=0,
             started_at=None,
             record=bool(self.record_dir),
+            wait_streak=0,  # unchanged WAIT steps since the last visible progress; decision D16
         )
 
     def snapshot(self):
@@ -119,6 +125,8 @@ class Agent:
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 # Nothing ran and the page reads the same, so Jev would choose again: stop like unchanged actions.
                 state["stale_streak"] = state["stale_streak"] + 1 if unchanged else 0
+                if not unchanged:
+                    state["wait_streak"] = 0  # the page changed or is still navigating: visible progress (D16)
                 if state["stale_streak"] == 3:
                     state["status"] = "blocked"
                     raise ValueError(f"Three choices in a row went stale while the page read stayed the same: {stale}")
@@ -129,7 +137,10 @@ class Agent:
             if state["started_at"] is None:
                 state["started_at"] = time.perf_counter()
             if not state["browser"].fresh(state["page"]):
+                previous = state["page"]["fingerprint"]
                 state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                if state["page"]["fingerprint"] != previous:
+                    state["wait_streak"] = 0  # the page changed since the last read: visible progress (D16)
             state["decision"] = None
             if state["status"] in {"done", "blocked"}:
                 raise ValueError("This run has stopped. Start a fresh demo.")
@@ -249,6 +260,14 @@ class Agent:
                 if len(repeated) == 3 and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
                 else "ready"
             )
+            # D16: a changed page restarts the count, a WAIT that changed nothing adds one, and other steps keep it.
+            if state["history"][-1]["page_changed"]:
+                state["wait_streak"] = 0
+            elif action["kind"] == "wait":
+                state["wait_streak"] += 1
+            if state["wait_streak"] == WAITS_BEFORE_CLAUDE:
+                state["status"] = "blocked"
+                raise ValueError("Jev judged the page still loading")
         else:
             raise ValueError("Unknown command")
         return self.snapshot()

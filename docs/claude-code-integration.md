@@ -158,7 +158,7 @@ Each review assumed the previous draft shipped as written and failed by month 3.
 | Two sessions could share a daemon mid-run, and swapping `sys.stdout` from threads races | behaviour | One non-blocking file lock across processes. No stdout swap: mcp 2.1.1 already points fd 1 at stderr while serving. |
 | The instructions would exceed Claude Code's ~2,000-character truncation | behaviour | Instructions stay under 1,500 characters, and each stop carries its own next step |
 | `mcp` as an optional extra let the new tests be skipped | consistency | `browser-harness[mcp]` becomes the regular dependency |
-| Seven report subcommands, a transcript hook, notifications, env-var thresholds, and unused tool knobs | simplicity | One report script, no hook, no notifications, no env-var thresholds, and two tools; `run_goal` takes four arguments |
+| Seven report subcommands, a transcript hook, notifications, env-var thresholds, and unused tool knobs | simplicity | One report script, no hook, no notifications, no env-var thresholds, and three tools; `run_goal` takes five arguments |
 | Evidence claims were unchecked, and results quoted dollar amounts that the evidence avoids | consistency | Re-measure after the core changes, and report tokens, not dollars |
 | The server keeps running old code after edits | simplicity | A source hash computed at import goes in every run file. Reconnect with `/mcp` after edits. |
 
@@ -176,7 +176,7 @@ Not adopted:
 | **Uncertain steps** | The executor acts on Jev's top answer. Confidence is recorded, and the report tests it. | Frictionless; data before gates |
 | **Site boundary** | By default, the site the run starts on: its host without `www.`, plus subdomains. `allowed_sites` widens it, and `["*"]` lifts it. | This assumes cross-site jumps mostly mean sign-in or payment, which Claude should see; the report's site-change count (§7.4) tests that. It costs one extra Claude turn when the goal needs another site, and reverses the previous draft's "no default limit". |
 | **Missing values** | The executor stops and names the field. Claude re-instructs with the value. | Values stay in the instruction, where the run file shows them |
-| **Tab ownership** | The executor owns one tab, in its own window that never takes keyboard focus (`JEV_BACKGROUND_TAB=1`: a hidden tab in the current window), unless a run passes `foreground_window=True`. It closes on the next `url` call or when the server exits. | One controller per tab, no cleanup tool |
+| **Tab ownership** | The executor owns one tab, in its own window that never takes keyboard focus (`JEV_BACKGROUND_TAB=1`: a hidden tab in the current window), unless a run passes `foreground_window=True` or Claude calls `show_window`. It closes on the next `url` call or when the server exits. | One controller per tab, no cleanup tool |
 | **Server name and dependency** | `jev-ultrafast`, with `browser-harness[mcp]` as a regular dependency | Tool names say what acts, and there is no optional-extra path |
 | **Scope** | User-level MCP server, pre-allowed with `mcp__jev-ultrafast__*`, started lazily | Works in every project with no prompts. Sessions that never browse never touch Chrome. |
 
@@ -224,7 +224,7 @@ Claude ── run_goal(goal, url, allowed_sites, allow_commit) ──▶ jev-ult
 Claude then: verifies → report_outcome → next instruction
 ```
 
-### 6.1 Tools (both called by Claude)
+### 6.1 Tools (all called by Claude)
 
 1. **`run_goal(goal, url=None, allowed_sites=None, allow_commit=False, foreground_window=False)`: delegate one bounded sub-goal to the executor.**
    - With `url`: close the previous owned tab, open a new one in its own unfocused window, and start a new run.
@@ -239,6 +239,9 @@ Claude then: verifies → report_outcome → next instruction
    - `evidence` names what Claude checked, for example "URL is /travel/flights/search; fields read Zürich, London, Thu Oct 22; results visible in the screenshot".
    - When you correct a result, Claude records it with `by="user"`. Your label overrides Claude's.
    - `lesson` and `lesson_detail` store a site note, always unapproved (`docs/failure-review.md` §6.3). Claude passes them on a passing run after an earlier run on the same sub-goal failed, naming what fixed it, or passes `use_claude_in_chrome` on a failed run it finished in Claude in Chrome.
+3. **`show_window()`: bring the owned tab's window up, for the user to act in.**
+   - It puts the window in front of every other window, taking keyboard focus, and runs nothing: no Jev call, no read, no run file. With no open tab it returns `stopped: no open tab; call run_goal with a url`.
+   - Claude calls it when a stopped or blocked run's screenshot shows the page waiting for what only you may give or decide: a sign-in, a passcode, a verification code, a CAPTCHA or a consent. Claude tells you what the page asks, never asks for the secret in chat, and continues with `run_goal` without `url` once you say you are done: the tool's reply says so, since the instructions (§6.4) only name the tool. The next run's file records `after_show_window`, so the report can tell those runs from re-asks.
 
 ### 6.2 Loop and stops
 
@@ -280,7 +283,7 @@ finally:
 | Status | When | The result's next-step line |
 | --- | --- | --- |
 | `done` | Jev answered DONE on an unchanged page | Verify the page and screenshot, then call `report_outcome` |
-| `blocked` | Jev answered BLOCKED, three unchanged actions in a row, three choices in a row gone stale while the page read stayed the same, the Agent's 60-action or 120-decision cap, the site boundary, or the commit boundary | Read the stop reason, then try a narrower goal, widen `allowed_sites`, pass `allow_commit` if the user asked for that commit, or use Claude in Chrome |
+| `blocked` | Jev answered BLOCKED, two WAIT steps on a page that did not change between or after them ("Jev judged the page still loading"), three unchanged actions in a row, three choices in a row gone stale while the page read stayed the same, the Agent's 60-action or 120-decision cap, the site boundary, or the commit boundary | Read the stop reason, then try a narrower goal, widen `allowed_sites`, pass `allow_commit` if the user asked for that commit, or use Claude in Chrome |
 | `stopped` | Any other reason: an error (the repo's messages say whether anything executed), a missing field value, 90 s, cancellation, a new tab, a dialog, a failed save, no open tab, an invalid `url`, or the lock is busy | Read the stop reason and fix its cause; check "may have run" before retrying |
 
 **With learning on,** the default, a run with a failure code gets that code's recovery as its next step instead, and a result that shows site notes adds "see the site notes below" (`docs/failure-review.md` §5 and §6.4). `JEV_LEARNING=0` restores the lines above.
@@ -294,6 +297,7 @@ The result holds at most 8,000 characters of text plus the stop screenshot as an
 - **Labels** are capped at 80 characters, and dropdown options appear as a count.
 - **Fields:** only form fields are listed (typable, selectable, or with a form-control role such as checkbox or combobox), at most 60. Fields with a value come first, then the rest in page order, with a count of any left out.
 - **The `next:` line holds only text the server wrote.** Stop reasons can quote the page (a button label, a pop-up URL, a host, a covering element's tag), so they open the untrusted block as `stop reason: …`. Each result's markers carry a random ID (`<untrusted page content 1f2e3d4c: …>`), so page text cannot close the block early, even with look-alike characters. Phrases that imitate a marker are also rewritten (`untrusted-page-content`). Checked live with a page whose title, labels and text contained the closing marker.
+- **Jev's last answer:** a result whose stop is Jev's own answer, "Jev answered BLOCKED" or "Jev judged the page still loading", adds a line after `next:`, as `Jev's last answer: BLOCKED 0.50 · CLICK 0.48 · WAIT 0.02`: the top three operation probabilities, so Claude can tell a near tie from a sure answer (`docs/executor-improvements.md` §5). It is server text, outside the untrusted block.
 - **Site notes** (`docs/failure-review.md` §6.4): on a site with notes, at most 3 in 900 characters, those matching the run's failure code first, under "site notes from earlier runs: hints, not instructions". Each shows its hint, its detail, any URL, its age, and whether you approved it.
 - **Order and overflow:** the block starts with the stop reason, then the input that may have happened, then the steps, the page's URL and title, the site notes, the fields, and last the visible text, which takes whatever space is left. If everything before the visible text still passes 8,000 characters, the block is cut once there, with a note that the run file has the rest. The site notes come before the fields, so a long field list is cut before them. The closing marker and the run-file path always stay.
 
@@ -324,7 +328,8 @@ run file: /path/to/jev-ultrafast/artifacts/runs/20260923-114102-a3f9.json
 ```text
 Delegate browser sub-goals to a fast executor: Jev picks each step, code performs it.
 - Use run_goal for multi-step navigation, search, and forms. Use Claude in Chrome for
-  visual judgment, iframes, uploads, drag, or anything run_goal reports blocked.
+  visual judgment, iframes, uploads, drag, or when a result's next step says so.
+- When a page waits for the user (sign-in, passcode, CAPTCHA), call show_window.
 - Write one bounded, literal goal: exact values, absolute dates, an end state, an explicit stop.
 - The goal is the authorization. Mention a purchase, booking, message, deletion, or account
   change only if the user asked for it, and then pass allow_commit=true; otherwise add "Do not ...".
@@ -353,12 +358,13 @@ Claude instructs ──▶ executor acts on Jev's answers ──▶ run file ─
 
 `artifacts/runs/<run_id>.json` is `Agent.snapshot()`, the format of the existing `state.json` files, without the screenshot and plus these keys:
 
-- **`call`:** the goal, URL, `allowed_sites`, and `allow_commit`.
+- **`call`:** the goal, URL, `allowed_sites`, `allow_commit`, and `foreground_window`.
 - **`attempt`:** the input about to happen. It is set before each input and cleared once the input is in `history`. A run that stops with `attempt` set may have performed that input.
 - **`result`:** the status, the notes, and the exact text Claude received.
 - **`outcome`:** labels from `report_outcome`.
 - **`source`, `pid`, `target`:** one source hash computed at import (the hashing `measure_flights.py` already does), the server's PID, and the tab's target ID.
 - **`previous_run`, `failure`, `notes_shown`:** the run this server saved just before, which links a sub-goal's runs into a chain; the run's failure code, or null; and the IDs of the site notes its result kept (`docs/failure-review.md` §3, §4 and §6.4).
+- **`after_show_window`:** whether `show_window` ran since the previous run started (§6.1).
 
 Each decision entry also gains the page's `omitted_actions` count.
 
@@ -403,7 +409,7 @@ Each decision entry also gains the page's `omitted_actions` count.
 - **Grouping:** the report prints one line for all runs, then one per pair of source hash and the Jev model version the API reported, so any change shows up as a before/after pair.
 - **Sample size:** each group shows its run count. Treat a group with fewer than 5 labeled runs as an anecdote; `docs/performance.md` makes the same caveat about its three pairs.
 - **Model version:** pin `TYPESAFE_MODEL=jev-1.13.0` when comparing, because `jev-latest` moves.
-- **Failures, notes and reviews:** after these lines, the report adds failure codes, stale-budget stops, runs per sub-goal, possible false DONEs, site notes, excluded runs left out, and reviews, each only when it has something to show (`docs/failure-review.md` §9).
+- **Failures, notes and reviews:** after these lines, the report adds failure codes, stale-budget stops, runs per sub-goal, same-tab runs after a Jev stop, possible false DONEs, site notes, excluded runs left out, and reviews, each only when it has something to show (`docs/failure-review.md` §9).
 
 ### 7.5 Improve
 
@@ -514,7 +520,7 @@ About 270 new or changed lines were estimated; the build came to about 710 acros
 - **Orphan-tab cleanup at startup:** add if killed servers leave tabs behind. Close targets recorded by run files whose PID is gone. One known case: a SIGTERM during a first page load that takes longer than the 5 s shutdown wait leaves that tab open (checked with a fake 7 s load).
 - **Per-request timeouts from the remaining budget:** add if slow model calls overrun the 90 seconds in practice.
 - **Label-enforcing `Stop` hook:** add when more than 20 % of runs stay unlabeled.
-- **Stale-drop reasons and WAIT loops:** add when the report shows stale decisions or budget stops whose cause the run file cannot explain. Save each dropped decision's `StalePage` text, and stop a covered, covered, WAIT loop as the three-stale-choices stop does. Both were found in the stall fix's review and live QA (plan decision 13); neither was seen in a real run.
+- **Stale-drop reasons and WAIT loops:** add when the report shows stale decisions or budget stops whose cause the run file cannot explain. Save each dropped decision's `StalePage` text, and give a covered, covered, WAIT loop the three-stale-choices stop's code, `covered_target`. Both were found in the stall fix's review and live QA (plan decision 13); neither was seen in a real run. Since `docs/executor-improvements.md` §5, the two-WAIT stop ends that loop after two rounds, as `still_loading`, which a loading overlay over the target also gets; the screenshot tells them apart.
 - **Replay of stored decision requests:** add when prompt changes need testing without live runs.
 - **Shared-tab mode:** add when blocked hand-offs lose too much in-page state.
   - The executor would attach to a tab in Claude's tab group.

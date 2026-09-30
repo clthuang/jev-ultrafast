@@ -105,11 +105,12 @@ checks, lab safety rules and calvin answers where they still apply (§"Review of
   - every command that uses `$S` starts with `S=/Users/terry/projects/jev-ultrafast/artifacts/page-readiness-implementation;`,
     and every one that uses `$E` with `E=artifacts/experiments/2026-09-24/h8-network-settle/design-check/v4;`;
   - git ignores both folders.
-- **Line numbers** are for commit `8953b45`. `agent.py`, `browser.py`, `tests/test_agent.py` and
-  `scripts/check_guards.py` have not changed since `523ede7`, where the design's line numbers come from. Each "Read
-  first" also names the function, which survives edits.
+- **Line numbers** are for commit `8953b45`. `browser.py` and `scripts/check_guards.py` have not changed since
+  `523ede7`, where the design's line numbers come from. Design §5 (H9), built on 2026-09-29, changed `agent.py`,
+  `tests/test_agent.py`, `scripts/report_runs.py` and `tests/test_report_runs.py` outside the saved §4 diff's hunks,
+  which still apply. Each "Read first" also names the function, which survives edits.
 - **Decision numbers** continue from `docs/failure-review-plan.md`'s P1–P22, so each P-number names one decision in
-  the repo. The design's own are D1–D14.
+  the repo. The design's own are D1–D20; D15–D20 are §5's, built outside this plan.
 - **Never kill by a pattern built from a variable that could be empty.** 6.5 kills the labs by recorded process IDs,
   and refuses to touch a lab with no record.
 
