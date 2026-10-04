@@ -1,0 +1,15 @@
+{
+  "commands": [
+    {
+      "command": "uv run pytest -q tests/test_review_runs.py tests/test_review_batches.py tests/test_execution_contracts.py::test_late_decision_preserves_visited_private_url",
+      "exit": 0,
+      "output": "privacy-focused-final.log",
+      "result": "32 passed"
+    },
+    {
+      "command": "uv run ruff check scripts/review_runs.py jev_ultrafast/agent.py jev_ultrafast/site_notes.py tests/test_review_runs.py tests/test_review_batches.py tests/test_execution_contracts.py",
+      "exit": 0,
+      "output": "privacy-ruff-final.log"
+    }
+  ]
+}

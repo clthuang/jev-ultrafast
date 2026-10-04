@@ -1,0 +1,534 @@
+{
+  "verdict": "READY",
+  "helper_hashes": {
+    "pytest_evidence.py": "71c1ec8cef7ccf0bae0334f5d482c5a41901c795d7f9563d787b4924905fbdef",
+    "check_required_results.py": "f840a0d4a31fc977823f9cf2820f2090ff9ccc0ae99925a3ec7b62bd23ec9ae4",
+    "record_stage.py": "029b70d213d6c4a6691c4ebb4d98a681ad944973f38167cf350a9b93f6f09e5b"
+  },
+  "helper_hashes_unchanged_through_verification": true,
+  "prior_matrix_evidence": [
+    "release-helper-verification.json",
+    "release-helper-verification-v2.json"
+  ],
+  "scope": "Only final reported root-file inventory gaps and ordinary full offline/native-shaped pass rechecked. Byte-identical helper copies and real record_stage.py fixture manifest. No candidate runtime/source edit, application import, native browser or provider call. Temporary fixtures cleaned.",
+  "new_root_file_captured_before_run": true,
+  "dotenv_capture_refusal": {
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "Candidate must not contain .env\n",
+    "manifest_written": false
+  },
+  "fixture_source": "import os\nfrom pathlib import Path\nimport pytest\nCASE=os.environ.get(\"RELEASE_FIXTURE_CASE\", \"\")\n@pytest.mark.parametrize(\"value\", [0,1])\ndef test_required(value):\n    assert value in (0,1)\n@pytest.mark.native\ndef test_native():\n    assert True\ndef test_extra():\n    names={\"new_root_module\":\"new_unrecorded_module.py\", \"new_root_conftest\":\"conftest.py\", \"new_root_config\":\"pyproject.toml\", \"new_dotenv_during\":\".env\"}\n    if CASE in names:\n        Path(names[CASE]).write_text(\"# synthetic fixture content\\n\")\n",
+  "cases": [
+    {
+      "case": "full_pass",
+      "validator_exit": 0,
+      "passed": true,
+      "failures": [],
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-offline.xml",
+            "tests"
+          ],
+          "exit_code": 0,
+          "stdout": "...                                                                      [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-offline.xml -\n3 passed, 1 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "source_mismatches_after": []
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 0,
+          "stdout": ".                                                                        [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/full_pass-native.xml -\n1 passed, 3 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_native"
+          ],
+          "source_mismatches_after": []
+        }
+      ]
+    },
+    {
+      "case": "new_root_module",
+      "validator_exit": 1,
+      "passed": false,
+      "failures": [
+        "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-offline.json: unsuccessful session, collection, or source check"
+      ],
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-offline.xml",
+            "tests"
+          ],
+          "exit_code": 0,
+          "stdout": "...                                                                      [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-offline.xml -\n3 passed, 1 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "source_mismatches_after": [
+            "new_unrecorded_module.py"
+          ]
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 0,
+          "stdout": ".                                                                        [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_module-native.xml -\n1 passed, 3 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_native"
+          ],
+          "source_mismatches_after": []
+        }
+      ]
+    },
+    {
+      "case": "new_root_conftest",
+      "validator_exit": 1,
+      "passed": false,
+      "failures": [
+        "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-offline.json: unsuccessful session, collection, or source check"
+      ],
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-offline.xml",
+            "tests"
+          ],
+          "exit_code": 0,
+          "stdout": "...                                                                      [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-offline.xml -\n3 passed, 1 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "source_mismatches_after": [
+            "conftest.py"
+          ]
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 0,
+          "stdout": ".                                                                        [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_conftest-native.xml -\n1 passed, 3 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_native"
+          ],
+          "source_mismatches_after": []
+        }
+      ]
+    },
+    {
+      "case": "new_root_config",
+      "validator_exit": 1,
+      "passed": false,
+      "failures": [
+        "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-offline.json: unsuccessful session, collection, or source check"
+      ],
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-offline.xml",
+            "tests"
+          ],
+          "exit_code": 0,
+          "stdout": "...                                                                      [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-offline.xml -\n3 passed, 1 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "source_mismatches_after": [
+            "pyproject.toml"
+          ]
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 0,
+          "stdout": ".                                                                        [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_root_config-native.xml -\n1 passed, 3 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_native"
+          ],
+          "source_mismatches_after": []
+        }
+      ]
+    },
+    {
+      "case": "new_dotenv_during",
+      "validator_exit": 1,
+      "passed": false,
+      "failures": [
+        "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-offline.json: unsuccessful session, collection, or source check"
+      ],
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-offline.xml",
+            "tests"
+          ],
+          "exit_code": 0,
+          "stdout": "...                                                                      [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-offline.xml -\n3 passed, 1 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "source_mismatches_after": [
+            ".env: forbidden in candidate"
+          ]
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 0,
+          "stdout": ".                                                                        [100%]\n- generated xml file: /Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_during-native.xml -\n1 passed, 3 deselected in 0.01s\n",
+          "stderr": "",
+          "all_collected": [
+            "tests/test_contracts.py::test_required[0]",
+            "tests/test_contracts.py::test_required[1]",
+            "tests/test_contracts.py::test_native",
+            "tests/test_contracts.py::test_extra"
+          ],
+          "selected": [
+            "tests/test_contracts.py::test_native"
+          ],
+          "source_mismatches_after": []
+        }
+      ]
+    },
+    {
+      "case": "new_dotenv_before",
+      "validator_exit": null,
+      "passed": false,
+      "plugin_refused_before_execution": true,
+      "runs": [
+        {
+          "mode": "offline",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_before-offline.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_before-offline.xml",
+            "tests"
+          ],
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: Source differs from release manifest: .env: forbidden in candidate\n\n"
+        },
+        {
+          "mode": "native",
+          "argv": [
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_evidence",
+            "-c",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/candidate/pytest.ini",
+            "-q",
+            "-o",
+            "addopts=",
+            "-o",
+            "xfail_strict=true",
+            "--validation-source",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/fixture-hashes.json",
+            "--validation-evidence",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_before-native.json",
+            "--junitxml",
+            "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/release-helper-v3-wvh0_7ew/new_dotenv_before-native.xml",
+            "tests",
+            "-m",
+            "native"
+          ],
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: Source differs from release manifest: .env: forbidden in candidate\n\n"
+        }
+      ]
+    }
+  ]
+}

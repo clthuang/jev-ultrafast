@@ -1,0 +1,75 @@
+{
+  "status": "Read-only preparation; not implemented. Source ownership remains with the current gate implementer. SNAPSHOT starts only after GATE-REVIEWS.",
+  "sources": {
+    "proposal": "docs/robustness-efficiency-proposal.md:329-376",
+    "plan": "docs/robustness-efficiency-implementation-plan.md:120-129,512-541",
+    "select_snapshot_checkpoint": "snapshot-select-baseline.js",
+    "select_snapshot_sha256": "1103ab587a55c3bd65ee3f8bd4a914d71d30a7c2da1511784d34e15f615d1530",
+    "current_progress_function": "def fingerprint(state):\n    content = {k: state[k] for k in (\"url\", \"text\", \"actions\", \"scroll\")}\n    content[\"actions\"] = [\n        {**action, \"option\": {key: value for key, value in action[\"option\"].items()\n                              if key not in {\"document_id\", \"cache_epoch\"}}} if \"option\" in action else action\n        for action in state[\"actions\"]\n    ]\n    if state.get(\"evidence\"):\n        content[\"evidence\"] = state[\"evidence\"]\n    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()"
+  },
+  "protocol": {
+    "observation": "Return snapshot_schema=2, observation_token={epoch,generation}, the small original model/inspector fields (url,title,w,h,text,scroll,actions,evidence,omitted_actions), and bounded action guard references. Do not transmit marker/page_key/large target guards.",
+    "observe": "Scan into local prospective values. Allocate a provisional next-generation token. Construct and measure the complete public response. Only a successful below-ceiling observation atomically replaces the latest baseline, guard table and retained target map. Every successful observe advances generation, including an unchanged page.",
+    "fresh": "Use a dedicated cached comparison function receiving schema/token and optional action/guard reference. Never invoke observe or READ_STATE through the old MARKER expression. Reject absent/recreated cache, wrong document/epoch/generation, unrecognized target or stale guard reference. Scanning may allocate weak IDs for newly seen nodes, but must not replace the baseline, token or strong target map.",
+    "baseline": "Keep only the latest accepted exact global semantics, exact page/form key, per-target guard records and deduplicated scope strings. Equality compares full arrays/strings; JSON serialization equality is acceptable, semantic hashes or mutation counters are not.",
+    "scoped_vs_global": "Global freshness retains current full marker semantics. CLICK/SELECT scoped freshness retains page/form key plus selected target/scope guard semantics; do not silently substitute progress data or overclaim broader guarantees. Continue current geometry exclusion for freshness and perform hit-testing at execution.",
+    "select": "Replace transported page_key/guard in SELECT_ACTION with the page token and a target guard reference tied to epoch+generation+node. In the same synchronous evaluation, validate token/reference, recompute exact applicable evidence, check the existing select/option descriptor and current geometry, then selectedIndex and one event pair. No await or retry. Explicit overflow before assignment must raise SnapshotTooLarge, not UncertainAction or StalePage.",
+    "schema_compatibility": "Old stored observations remain data for readers. Browser freshness/execution must not accept a missing schema, old schema, replayed serialized token or references from another session. Never add an implicit legacy execution fallback."
+  },
+  "progress": {
+    "keep": "URL, visible text, capped actions with geometry, scroll position and height, plus the SELECT-stage multi-select evidence. Use the complete canonical observation before policy filtering. Preserve semantic option identity/index/label/value/state.",
+    "exclude": "All added protocol identity wherever nested: schema version, observation token, guard reference/generation, document_id, cache_epoch and diagnostic work counters. Current descriptor document/cache exclusions must be extended to nested references rather than replaced by dropping the descriptor.",
+    "parity_cases": [
+      "Unchanged observe twice: different observation token, equal progress fingerprint; first token is stale.",
+      "Freshness A -> mutate B -> check old token twice: false both times; baseline remains A.",
+      "Geometry-only movement within viewport: unchanged freshness; changed progress because rect is retained.",
+      "Scroll-height-only change: changed progress, with freshness behavior matching baseline.",
+      "Offscreen form property or omitted control semantics change: global freshness false; unchanged progress when capped actions/text/scroll are unchanged.",
+      "Title-only change: global freshness false, progress unchanged if its established projection is unchanged.",
+      "Changed multi-select selected values: evidence/progress changes; no SELECT or descendant CLICK becomes eligible."
+    ]
+  },
+  "bounded_work": {
+    "two_pass": "Continue the complete semantic scan, including omitted candidates and safe offscreen form properties. Retain only first250 target actions for public eligibility before building target guards. Scroll/WAIT controls remain separate from the250 target-action cap.",
+    "identity": "identity(node) updates only WeakMap identity allocation. A separate retain(node) builds the new strong reverse map for offered controls and offered SELECT options. Observation-only multiple controls and global signature nodes need scalar/weak identity only.",
+    "scope": "Read scope.innerText once per distinct target scope per scan and retain its existing6000-character projection, shared by guard records. Do not reuse scope text across freshness checks. Memoization must not hide new text.",
+    "references": "After successful observe the strong node map equals unique offered controls union offered SELECT option nodes; no omitted/offscreen signature nodes. Maximum500 references is a conservative bound for250 distinct SELECT target actions. Detached current targets may remain until baseline replacement, since the map is bounded and identity must be checked without erasing the baseline.",
+    "counts": "Instrument actual guard builds, unique scope reads, strong-reference count, offered target/action count, omitted count, scan/serialization time and UTF8 bytes. Keep metrics outside progress identity. Guard builds <=250; scope reads <=unique materialized scopes.",
+    "limits": "DOM traversal and exact global signatures remain proportional to DOM size. Bound guard work and transfer honestly; do not claim constant total CPU/memory or a general latency speedup."
+  },
+  "overflow": {
+    "measurement": "Measure TextEncoder().encode(JSON.stringify(publicObservation)).byteLength inside Chrome, excluding optional screenshot. MAX_SNAPSHOT_BYTES=262144. Bound the entire returned observation, including metadata. Avoid a self-referential bytes field or remeasure after adding it. Never truncate meaningful labels/values to fit.",
+    "result": "Return only a bounded typed snapshot_too_large envelope with counts/attempted byte count, and no executable actions/token. Invalidate old executable baseline/references on overflow; no stale-table fallback.",
+    "python": "Browser.observe and Browser.fresh parse explicit overflow into SnapshotTooLarge with bounded diagnostic counts. It is terminal, never StalePage, never part of the observation retry loop. A SELECT overflow tag is known-before-input only; a missing/malformed dispatch reply remains uncertain.",
+    "agent": "After GATE-LIMITS integrate with its shared terminal wrapper. Clear decision/pending text and mark the old page diagnostic/not fresh. Before-input overflow executes nothing; after-input observation overflow preserves exactly one already logged history entry and does not reissue input. Do not replenish counters or ask the model to continue.",
+    "entries": "Handle constructor observation overflow with owned-tab cleanup; valid new_goal observation overflow must not leave the old goal executable. Invalid policy/goal validation remains atomic and precedes every read.",
+    "adapters": "MCP final verification overflow must produce stopped/snapshot_too_large even after a provisional DONE, retain earlier page only as not-fresh diagnostics, and preserve uncertainty/history. Avoid a generic new-goal failure path that probes/reuses the tab and silently resumes. Inspector disables commands through stopped state and clears executable choice. Report readers accept legacy data without making it executable."
+  },
+  "tests": {
+    "required_offline": [
+      "test_freshness_does_not_replace_baseline",
+      "test_progress_excludes_nested_protocol_identity",
+      "test_progress_and_freshness_keep_distinct_projections",
+      "test_old_tokens_reject_after_observe_reset_or_navigation",
+      "test_guard_work_and_transport_are_bounded",
+      "test_strong_references_cover_only_offered_targets",
+      "test_overflow_is_terminal_at_each_adapter",
+      "test_legacy_snapshots_report_but_cannot_execute"
+    ],
+    "required_native": [
+      "tests/test_browser_native.py::test_snapshot_freshness_parity",
+      "tests/test_browser_native.py::test_snapshot_payload_and_progress_contracts"
+    ],
+    "native_matrix": "Unchanged pages, within-viewport geometry motion, title/URL, relevant scope and unrelated visible text, safe offscreen form properties, omitted control mutation, scroll height, duplicate labels, select value/label/ownership/reorder/disabled state, cache recreation and identical-document navigation. Compare global and scoped baseline outcomes separately. Replay all accepted SELECT tests through schema2.",
+    "overflow_matrix": "Through actual observation adapter: setup, predict freshness, pre-input CLICK/SELECT, after one logged action, new_goal, MCP final verification and inspector. Assert terminal code, no executable stale state or subsequent helper/model/input/recovery, and correct retained history/attempt outcome."
+  },
+  "measurement": {
+    "safety": "Use prepare --fixtures with the already reviewed owned proxy/profile/daemon lab, verify manifest before every native test, no paid models or external URLs, and close all recorded processes afterward.",
+    "references": "Retain original E/baseline snapshot and the preserved SELECT-stage snapshot checkpoint. Compare original transport/work numbers and SELECT-stage semantic parity separately. Use different owned tabs for baseline/candidate scripts so one script cannot overwrite the other cache.",
+    "dense_fixtures": "250,1000,5000 actual visible small controls on a fixed grid (not ordinary vertical flow that leaves most controls offscreen), plus a shared6000-character form/scope context. Keep first6000 visible-text characters constant while mutating omitted controls to isolate progress. These canonical stress pages must return full capped evidence below262144 bytes, not merely overflow.",
+    "oversize_fixture": "A separate long meaningful label/value fixture, including multibyte Unicode, deliberately exceeds262144 bytes and proves explicit terminal overflow without truncation. Strong-reference and guard assertions still apply.",
+    "sampling": "Record every attempt, including warmups, exceptions and timeouts. Use declared alternating baseline/candidate order and a fixed sample count (for example3 warmups plus10 measured scans per fixture). Report raw samples and count/min/median/p95/max for browser scan/serialization and end-to-end observation separately, alongside bytes and work/reference counts.",
+    "comparison": "Below-ceiling candidate offers the same canonical supported semantic actions as the reference, except approved policy/multiple-select differences and stronger SELECT descriptor validation. Compare stable fixture DOM identities rather than coincidentally equal numeric node IDs across separate tabs.",
+    "claims": "Report observed native byte/work savings and measured distributions; do not generalize a speedup from synthetic DOM or byte reductions alone."
+  }
+}

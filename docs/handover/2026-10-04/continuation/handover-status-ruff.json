@@ -1,0 +1,14 @@
+{
+  "command": [
+    "uv",
+    "run",
+    "ruff",
+    "check",
+    "."
+  ],
+  "cwd": "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate",
+  "started_at": "2026-10-04T06:26:49.991941+00:00",
+  "finished_at": "2026-10-04T06:26:50.077701+00:00",
+  "exit_code": 1,
+  "log": "handover-status-ruff.log"
+}

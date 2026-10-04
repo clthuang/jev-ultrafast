@@ -1,0 +1,48 @@
+........................................................................ [ 56%]
+.........F.............................................                  [100%]
+=================================== FAILURES ===================================
+_ test_apply_refuses_bad_replies[a retirement citing no queued run on the note's site] _
+
+change = {'decisions': [{'action': 'retire', 'detail': '', 'hint': '', 'note': 'example.com-1', ...}]}
+reason = 'cites no queued run on example.com'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x109c4ee40>
+capsys = <_pytest.capture.CaptureFixture object at 0x109bf2650>
+
+    @pytest.mark.parametrize(
+        ("change", "reason"),
+        [
+            pytest.param({"decisions": [{**retire("example.com-1", FAILED), "action": "approve"}]}, "is not one of",
+                         id="an approval"),
+            pytest.param({"decisions": [retire("example.com-9", FAILED)]}, "no note example.com-9", id="an unknown note"),
+            pytest.param({"decisions": [retire("example.com-1", OTHER_FAILED)]}, "cites no queued run on example.com",
+                         id="a retirement citing no queued run on the note's site"),
+            pytest.param({"decisions": [retire("clinicaltrials.gov-1", OTHER_FAILED)]}, "is approved",
+                         id="retiring an approved note"),
+            pytest.param({"summary": "x" * 501}, "over 500 characters", id="an over-long field"),
+            # A note's detail holding a typed address, refused on its own (design v4.4). The address holds the queued site
+            # example.com, which must not hide it.
+            pytest.param({"decisions": [{"action": "add", "note": "", "runs": [OTHER_FAILED], "hint": "scroll_first",
+                                         "detail": "The login used bob@example.com.", "reason": ""}]},
+                         "its detail holds a value from a task", id="a task value in a note's detail"),
+        ],
+    )
+    def test_apply_refuses_bad_replies(change, reason, monkeypatch, capsys):
+        unapproved_note()
+        # A lesson after a run that ended on about:blank has no site; it must not switch the reply's checks off.
+        site_notes.add_note({"site": "", "hint": "use_claude_in_chrome", "detail": None, "url": None, "failure": None,
+                             "runs": {"failed": ["20260926-080000-0001"], "recovered": None}})
+        write_run(FAILED, history=[typed_step(CANARY), typed_step("bob@example.com")])
+        write_run(OTHER_FAILED, site="clinicaltrials.gov")
+        notes_before = site_notes.NOTES_PATH.read_bytes()
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({**EMPTY_REPLY, **change})))
+        review_runs.main(["apply", "--batch", review_runs.prepare_batch()["batch_id"]])
+>       assert reason in capsys.readouterr().out
+E       AssertionError: assert 'cites no queued run on example.com' in 'decision 1, retire: refused: the note is not selected in this batch\ndigest: artifacts/reviews/48167cc9ae64249d71e4bd0e0ea243a7.json\n'
+E        +  where 'decision 1, retire: refused: the note is not selected in this batch\ndigest: artifacts/reviews/48167cc9ae64249d71e4bd0e0ea243a7.json\n' = CaptureResult(out='decision 1, retire: refused: the note is not selected in this batch\ndigest: artifacts/reviews/48167cc9ae64249d71e4bd0e0ea243a7.json\n', err='').out
+E        +    where CaptureResult(out='decision 1, retire: refused: the note is not selected in this batch\ndigest: artifacts/reviews/48167cc9ae64249d71e4bd0e0ea243a7.json\n', err='') = readouterr()
+E        +      where readouterr = <_pytest.capture.CaptureFixture object at 0x109bf2650>.readouterr
+
+/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate/tests/test_review_runs.py:443: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_review_runs.py::test_apply_refuses_bad_replies[a retirement citing no queued run on the note's site]
+1 failed, 126 passed in 2.68s

@@ -1,0 +1,22 @@
+{
+  "README.md": "6ee00258342c763a6e5c12db8c45620af07fdd8f9edf2c66d1ed6d97a9f912bf",
+  "docs/claude-code-integration.md": "7976e45dc5c72537b7ad40bb5f88553b135bf9c4b0b9cf33bf223fa4ddd6e250",
+  "jev_ultrafast/contracts.py": "ce680f7f3b66bd9312141640227423c450f914d99db6fff5309e1b6311df8543",
+  "jev_ultrafast/agent.py": "d1a91d601e112882e0620aa4c42c9e5725c854f513bdd61e239ac115130dbaec",
+  "jev_ultrafast/model.py": "410b0c9b4ad40d97e55e7fc8c5c6d53abcd861c2ba11a4bd936ab928c4994755",
+  "jev_ultrafast/mcp_server.py": "17a1be6aff2478dfdf5d73c0de8e85f50f8ca05faefebe92d31f42de7a38b4aa",
+  "jev_ultrafast/demo.py": "69037b94a4bb8d844a21eedadc7b2560413b0154bd5f38568d358676066c90b2",
+  "jev_ultrafast/static/app.js": "3e13f396fe3d8c5d3a64d091dd69ef28e1cfa5b48add9071554a354b5ddb7bbe",
+  "jev_ultrafast/static/index.html": "b0eff9b9510e12a47362108e7b58b0b2ecf933943f259cd3ddba76a6b5f04235",
+  "examples/run.py": "f06932e924ced7c4673c6b9cdefe8316178b10e93346cfeac58613310da148f2",
+  "examples/flights.py": "9126e8dc3cdec8dbc09fabd070178855491a9b6f69d9a9b885afc28811532bf5",
+  "scripts/smoke.py": "ed45d4ae150e284894d8dd5db73dd2fe8c13071929a0790628c1b44d5a78da60",
+  "scripts/measure_flights.py": "55e01791f2e24c16d3478eb37d859c269ba38aa8bb53ad5a36d4035b29de7612",
+  "scripts/record_flights.py": "73a13ce5aa36bf5b4ddd94595a1126b9617a50dea87c9f20fe6ebe5e2e288809",
+  "scripts/phase10/run_arm.py": "a7ef297ff72f960a7fbc0792806be3ef26610a93e3c30215a622b1d6072d9242",
+  "scripts/report_runs.py": "5ce81deeae83615b82e20d223e3fae267b408f69ec2fb2ad877527c0cdf44de4",
+  "tests/test_execution_contracts.py": "54375717b1ee7e419b703a72eb393109de59884adce3943b93068706f3292bff",
+  "tests/test_agent.py": "659b7ee7afc90de9241b4f2b192914900ddcaad4ddc4842eb4366a659f408561",
+  "tests/test_mcp_server.py": "9d6b4af27cb77e9cc0fbdf703023904ca64577dbddf57f5884488fcb4c155112",
+  "tests/test_report_runs.py": "c27633487c50c7977bd57453b39e34876cca951eef3d4dca938c2c82297668f4"
+}

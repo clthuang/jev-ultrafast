@@ -1,0 +1,52 @@
+{
+  "gate": "GATE-SELECT",
+  "verdict": "READY for isolated candidate LIMITS implementation",
+  "reviewer": "execution_review",
+  "review_mode": "read-only source and recorded evidence review; no test rerun or browser launched by reviewer",
+  "source_hash_manifest": "select-source-hashes.json",
+  "source_hash_manifest_sha256": "b304b2a0fb4478852670d50f8e6ac21f60322e9ea3bea5354a6d33772379f18d",
+  "verified_source_hashes": {
+    "jev_ultrafast/snapshot.js": "1103ab587a55c3bd65ee3f8bd4a914d71d30a7c2da1511784d34e15f615d1530",
+    "jev_ultrafast/browser.py": "711fc98c8f7dbe68fe4c90c695103564929318e4cd21d217e832300f5dd0cbcb",
+    "jev_ultrafast/model.py": "9bda0895f1b6f419754b2a0e979078f4c29b3d9cb861308cfb0d85eeb20b8b16",
+    "jev_ultrafast/agent.py": "4b4b4ba3f2a82d2a892dc14068ba9990890de12a1d41539b85c522024bceb888",
+    "jev_ultrafast/mcp_server.py": "d4f32ecf8a681d3a523a4097f574b823c5cb54b25652d7f8029d6bd428a92fca",
+    "tests/test_browser_contracts.py": "c6180710da101f9a905cbb6452b37fd766050aef3367ead78bd945115047ffd5",
+    "tests/test_browser_native.py": "02af742ce4f4059ecba5b63e58dc41d1ef8c5c357c992d91b9654781981456d4",
+    "tests/fixtures/select_dom.cjs": "968f66b856ae13d5e8df1c0dd51f3077b7af9d000dd9b3c547f19826a7712c72",
+    "tests/fixtures/native_select.html": "cfdcafe3279a7ff90aeb5f03fa70ffac9bff5e97f214d16134cf9b7b9b84d04f",
+    "tests/test_mcp_server.py": "16b05718ebd79b897f29326efd02d12f54d47000d783f9cdfc8bfe2bee08ccd3"
+  },
+  "checks": "select-checks.json",
+  "evidence": {
+    "offline": "333 passed, 1 deselected",
+    "native": "30 passed, including 29 SELECT proof files and one network isolation case",
+    "ruff": "passed",
+    "snapshot_and_app_syntax": "passed",
+    "cleanup": {
+      "status": "closed",
+      "live_processes": {
+        "fixtures": null,
+        "proxy": null,
+        "chrome": null,
+        "daemon": null
+      }
+    },
+    "egress_canary_connections": 0
+  },
+  "findings": [],
+  "verified_contracts": [
+    "Exact observed option identity/index/meaning, selected and effective disabled state, document/cache epoch",
+    "Atomic full page/target context, visibility and hit-test validation before selectedIndex and one input/change pair",
+    "19 stale mutations rejected before input; fresh observation permits changed desired option",
+    "Native first-legend enabled exception and label attribute semantics",
+    "Multiple select preserves both selected values with zero events and no native descendant CLICK fallback",
+    "Lost real mutation reply is terminal uncertainty with exact retained descriptor and no next direct command input/model/read",
+    "Typed timeout cause permits existing MCP dialog dismissal, preserves uncertainty, never retries",
+    "Protocol epoch change invalidates freshness without manufacturing visible progress"
+  ],
+  "limits": [
+    "Stage gate does not authorize activation in root production source",
+    "Shared deadline, cooperative transport budgets and readiness/snapshot stages remain unimplemented at this gate"
+  ]
+}

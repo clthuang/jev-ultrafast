@@ -1,0 +1,97 @@
+{
+  "stage": "GATE-LIMITS",
+  "verdict": "READY",
+  "reviewer": "/root/browser_review",
+  "candidate": "/Users/terry/projects/jev-ultrafast/artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate",
+  "immutable_scope": {
+    "author_manifest": "limits-source-hashes.json",
+    "author_manifest_sha256": "2480807e6fc9f3d15e4667a58d147d6e0f2a4327539a576c5ba2c07c07cec069",
+    "author_file_hashes_verified": 11,
+    "gate_manifest": "limits-gate-hashes.json",
+    "gate_manifest_sha256": "0c6b09a182e57947cc6c2f61b80a295cbe5591dbb640a48f610fb4c7e58e8c1b",
+    "gate_candidate_file_hashes_verified": 72,
+    "gate_changed_paths": 31,
+    "hash_mismatches": [],
+    "production_changed_as_recorded_by_root": []
+  },
+  "findings": [],
+  "resolved_findings": [
+    {
+      "issue": "Phase-persistence failures after started input could leave direct Agent commands resumable.",
+      "resolution": "Started-input errors terminalize the run and clear pending executable state. Partial fills retain their phase and never become completed history. Confirmed complete clicks append history before persistence or stop checks; one matching release survives phase-save failure.",
+      "tests": [
+        "test_partial_fill_save_failure_is_terminal_and_keeps_release",
+        "test_completed_click_save_failure_keeps_history_and_stops",
+        "test_failed_phase_save_and_release_timeout_retain_uncertainty"
+      ]
+    },
+    {
+      "issue": "Raw transport cancellation after dispatch did not mark the attempt uncertain.",
+      "resolution": "Mouse, key and atomic SELECT transport cancellation retain uncertain dispatch evidence, preserve the original cancellation object, and prohibit further input. An unconfirmed press receives no speculative release. Failed saves do not hide cancellation; release uncertainty survives an earlier persistence error.",
+      "tests": [
+        "test_transport_cancellation_preserves_uncertain_attempt_and_original_error",
+        "test_partial_fill_releases_pair_once_then_stops",
+        "test_failed_phase_save_and_release_timeout_retain_uncertainty"
+      ]
+    },
+    {
+      "issue": "Missing provider usage was stored as unknown but rendered as measured zero.",
+      "resolution": "Shared token accounting preserves known-zero usage and unknown call counts. MCP and reports label unknown or partial totals explicitly; late decision/helper responses retain latency and known usage before being discarded.",
+      "tests": [
+        "test_unknown_and_partial_usage_are_not_rendered_as_measured_zero",
+        "test_late_successful_model_response_is_counted_but_not_executed"
+      ]
+    }
+  ],
+  "reviewed_contracts": [
+    "Terminal checks precede direct predict, act and tick work and prevent resumption.",
+    "The monotonic 90-second budget starts before the first external callback and expires at equality; stopped elapsed time is persisted.",
+    "Only outer tick recovery increments cumulative stale outcomes; outcome 120 stops before recovery observation.",
+    "Blocking model, helper and browser reads check stop state before and after work; each request uses positive remaining timeout budget.",
+    "No new gesture or text starts after stop; a confirmed press gets exactly one bounded matching release.",
+    "Completed execution is logged before post-input reads or stops; partial and uncertain attempts remain distinguishable.",
+    "Typed uncertain-action timeout causality still controls dialog dismissal without matching error text or retrying mutations.",
+    "MCP final verification is a separately timed five-second single-attempt read with no leftover input settling or stale retry.",
+    "Inspector and MCP use stopped state consistently; existing site-note failure classification remains unchanged.",
+    "New valid goals reset budgets and counters; invalid goals and policies preserve prior state."
+  ],
+  "evidence": {
+    "commands_manifest": "limits-checks.json",
+    "logs": [
+      {
+        "path": "limits-gate-final.log",
+        "sha256": "bb909ab16d739bb3b09ed36c1d9af6ddce0a8a79e4d96b63ea5ac7329d8b5903",
+        "hash_verified": true,
+        "observed_result": "422 passed in 4.40s",
+        "reported_exit_code": 0
+      },
+      {
+        "path": "limits-named-final.log",
+        "sha256": "12e5331e4520a7082478b46c2e6eb889405d7a5d20130df49f2f7752bf109514",
+        "hash_verified": true,
+        "observed_result": "45 passed in 0.43s; 15 exact required test nodes expanded by parametrization",
+        "reported_exit_code": 0
+      },
+      {
+        "path": "limits-ruff-final.log",
+        "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        "hash_verified": true,
+        "observed_result": "All checks passed!",
+        "reported_exit_code": 0
+      },
+      {
+        "path": "limits-app-syntax-final.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "hash_verified": true,
+        "observed_result": "Empty successful node --check output",
+        "reported_exit_code": 0
+      }
+    ]
+  },
+  "limitations": [
+    "Independent source and evidence review only; the reviewer did not rerun broad tests, launch a native browser, call paid APIs, modify candidate source, commit or push.",
+    "Deadlines are cooperative. In-flight HTTP phases and IPC connections can finish later; a confirmed paired release uses the normal bounded transport timeout.",
+    "Validation evidence covers the fixed LIMITS candidate. This is not final release, later PRIVACY/RUNS/REVIEWS/SNAPSHOT/READINESS approval or proof of deployment.",
+    "Final release offline and native suites must emit JUnit for the root-owned required-result validator. No additional test run was requested for this review."
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "checkpoint": "RUNS",
+  "reviewer": "/root/execution_review",
+  "reviewed_at": "2026-10-03T12:37:09.794607+00:00",
+  "verdict": "READY_FOR_SUBSEQUENT_ISOLATED_REVIEWS_WORK",
+  "review_mode": "Static frozen-source and recorded-evidence inspection; no independent test-suite rerun and no candidate/runtime source modifications. Pure-function regression probes executed from frozen AST definitions only.",
+  "source_manifest_sha256": "01307d41c991ec7401f71f23dd549511dde724b0d29042612230822fc7015c5b",
+  "source_hashes_verified": {
+    "jev_ultrafast/run_store.py": "bcfe04623b8f3c1496fbdee118b4b47882b37cdb1aa13563bd7160506b31741b",
+    "jev_ultrafast/store_io.py": "67eb0d875815302eee14a73181c15c502ce84921142577542b0a5fdc2680bda1",
+    "jev_ultrafast/agent.py": "35417cd5d8f7e0995b91d27b9e13542ef43ee8c35d9dcad543a101205389b1b3",
+    "jev_ultrafast/mcp_server.py": "12db52acbcc8d484b7e8435e2bb65acda694d8227549d45c21d55e2b8f6f36e1",
+    "tests/test_run_store.py": "6a4b4c1878af0cb1ba4446abb4a55e9b69091b73166fb67ce64f7831c48e95f3"
+  },
+  "recorded_checks": [
+    {
+      "command": "uv run pytest -q tests/test_run_store.py tests/test_agent.py tests/test_execution_contracts.py tests/test_mcp_server.py",
+      "exit": 0,
+      "output": "runs-focused-final.log",
+      "result": "338 passed"
+    },
+    {
+      "command": "uv run ruff check jev_ultrafast/run_store.py jev_ultrafast/store_io.py jev_ultrafast/agent.py jev_ultrafast/mcp_server.py tests/test_run_store.py",
+      "exit": 0,
+      "output": "runs-ruff-final.log"
+    }
+  ],
+  "evidence_hashes": {
+    "runs-checks.json": "3ae0ef8ca8b07be0ed0ebf1241631a913be01c3a2c9c14c7b4c3d516cd748c1f",
+    "runs-focused-final.log": "fe87381153bb77ebd0df2ec42d1cf2735c7f6ab26cc0c1b9c2b0cd4f5aced819",
+    "runs-ruff-final.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+  },
+  "findings": [],
+  "resolved_findings": [
+    {
+      "id": "RUNS-PUBLICATION-UNCERTAINTY",
+      "resolution": "report_outcome handles PublicationUncertain separately, says the label may already be recorded and asks for storage inspection before retry. The post-rename fsync failure test confirms one outcome and no automatic review trigger.",
+      "evidence": "jev_ultrafast/mcp_server.py:442; tests/test_run_store.py:85"
+    },
+    {
+      "id": "RUNS-SURROGATE-ROUNDTRIP",
+      "resolution": "Canonical JSON uses ASCII escapes with strict UTF-8 bytes, preserving lone surrogate browser strings and ordinary non-ASCII text on JSON roundtrip.",
+      "evidence": "jev_ultrafast/store_io.py:14; tests/test_run_store.py:104"
+    },
+    {
+      "id": "RUNS-MALFORMED-BY-CONTAINERS",
+      "resolution": "validate_run checks the by field is a string before set membership; malformed list/dictionary by values take the ordinary InvalidRun refusal and never replace bytes.",
+      "evidence": "jev_ultrafast/run_store.py:36; tests/test_run_store.py:42"
+    }
+  ],
+  "verified_properties": [
+    "Execution saves and outcome appenders resolve the parent path, acquire the same .metadata.lock, read current bytes while locked, validate, and publish through a unique same-directory temporary.",
+    "Execution saves preserve the complete disk outcome array; reporter appends preserve executor fields. Legacy absent outcomes become an empty list; valid custom outcome fields survive.",
+    "Malformed JSON, outer object, outcome array or entries stop before replacement.",
+    "Threaded 25-reporter/25-executor test checks every label survives; alias-parent lock test checks shared lock identity.",
+    "The lock-owning call returns before lesson and review callbacks; a nonblocking lock assertion tests both callbacks.",
+    "Publisher flushes and fsyncs the temporary, performs replace/exclusive link, then fsyncs the parent. Post-publication OSError becomes PublicationUncertain.",
+    "Agent.save delegates to the shared store while retaining existing incomplete-run error handling."
+  ],
+  "limitations": [
+    "Recorded focused suite: 338 passed and Ruff clean; independently inspected, not rerun.",
+    "Concurrent writer evidence uses actual thread publishers; no production process or real storage was touched.",
+    "Review receipt recovery, exact acknowledgments, process dispatch and shared publication recovery still require the subsequent REVIEWS checkpoint.",
+    "This prerequisite verdict does not authorize activation or migration."
+  ]
+}

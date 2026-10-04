@@ -1,0 +1,683 @@
+--- a/jev_ultrafast/browser.py
++++ b/jev_ultrafast/browser.py
+@@ -1,5 +1,6 @@
+ """Observed actions through Browser Harness; one CDP session, no per-step subprocess."""
+ 
++import contextlib
+ import hashlib
+ import json
+ import os
+@@ -7,18 +8,25 @@
+ import shutil
+ import subprocess
+ import sys
++import threading
+ import time
+ from pathlib import Path
+ 
+ from browser_harness import _ipc as ipc
+ from browser_harness.admin import NAME, daemon_browser_kind, ensure_daemon, restart_daemon
+-from browser_harness.helpers import cdp
++from browser_harness.helpers import cdp, drain_events
+ 
+ # Atomically read visible content and controls, preserving actual DOM node identity.
+ READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
+ MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+ # lsof lives in /usr/sbin on macOS, which a minimal PATH leaves out.
+ LSOF = shutil.which("lsof", path="/usr/sbin:/usr/bin:/sbin:/bin")
++# Delegated decisions D7 and D8 (docs/executor-improvements.md §4): before a DONE or BLOCKED answer stands, wait
++# while a content request of recent inputs is in flight, or was sent or ended in the last LOADING_QUIET_MS, and stop
++# polling LOADING_CAP_SECONDS after the last input. No minimum wait: where code sees no loading, Jev decides (H8c).
++LOADING_QUIET_MS, LOADING_CAP_SECONDS = 100, 5
++LOADING_TYPES = {"Document", "XHR", "Fetch", "Script"}  # the requests that bring content; images and fonts do not
++DAEMON_EVENTS = 500  # browser-harness 0.1.13 keeps its last 500 events (daemon.py BUF); a drain this long lost some
+ 
+ def foreign_browser_port():
+     """The local port jev's browser daemon uses when no process of this account listens on it, else None.
+@@ -70,6 +78,9 @@
+             self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+             # Page.handleJavaScriptDialog only reaches dialogs that open while Page is enabled on this session.
+             self.call("Page.enable")
++            # The loading wait (§4) follows this tab's requests through the daemon's buffer of CDP events, from the
++            # first input on: the start page's own requests belong to no input, as in H8b's prototype.
++            self.network, self.loading, self.last_request, self.input_done, self.lost = False, {}, None, None, False
+             self.call("Page.navigate", url=url)
+             deadline = time.monotonic() + 15
+             while time.monotonic() < deadline:
+@@ -125,13 +136,16 @@
+                 pass
+         for attempt in range(10):
+             try:
+-                return browser_operation(
++                page = browser_operation(
+                     {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                 )
+             except StalePage:
+                 if attempt == 9:
+                     raise
+                 time.sleep(0.02)
++            else:
++                self._track()  # the settle's and the read's events, taken in before Jev answers
++                return page
+         raise StalePage("Page did not settle")
+ 
+     def fresh(self, page, action=None):
+@@ -151,8 +165,20 @@
+             raise StalePage("Page changed since this decision. Observe again.")
+         if action["kind"] == "wait":
+             time.sleep(0.1)
++        else:
++            self._track()  # events so far belong to earlier inputs; this input's arrive after it
++            if not self.network:  # the first input: from here on, Network events report this tab's requests
++                self.call("Network.enable")
++                self.network, self.lost = True, False  # nothing of this tab's could be lost before
+         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
+         self.after_input = action if action["kind"] != "wait" else None
++        if self.after_input:  # D9: a wait step runs nothing in the page, so it is not an input
++            now = time.monotonic()
++            # D13: requests seen in the last LOADING_CAP_SECONDS may still bring an earlier input's result. Before
++            # the first input that runs there is none, so the start page's own requests are never carried.
++            self.loading = {request: sent for request, sent in self.loading.items()
++                            if self.input_done is not None and now - sent < LOADING_CAP_SECONDS}
++            self.last_request, self.input_done = None, now
+         return result
+ 
+     def close_popups(self):
+@@ -169,7 +195,77 @@
+         except RuntimeError:
+             return False
+         return True
++
++    def _track(self):
++        """Follow this tab's content requests through the daemon's buffer of CDP events (§4)."""
++        # ponytail: the daemon keeps one buffer for all its clients, and drain_events() empties it for all of them.
++        # Another client's drain can hide requests from this wait (it then ends as it would have before §4) or their
++        # ends (it waits out its cap), and this one empties theirs. A daemon of the executor's own is the upgrade.
++        try:
++            events = drain_events()
++        except Exception as error:
++            self.lost = True  # the daemon may have emptied its buffer before the reply failed (D10)
++            if isinstance(error, KeyError):  # browser-harness returns {} when the daemon closes without replying
++                raise RuntimeError("The browser daemon closed the connection.") from None
++            raise
++        self.lost = self.lost or len(events) >= DAEMON_EVENTS
++        now = time.monotonic()
++        for event in events:
++            params = event.get("params") or {}
++            if event.get("session_id") != self.session:
++                continue
++            if event.get("method") == "Network.requestWillBeSent" and params.get("type") in LOADING_TYPES:
++                # D8: a cross-site iframe's document ends on the iframe's own session, never here. A tab's target id is
++                # also its main frame's id.
++                if params["type"] != "Document" or params.get("frameId") == self.target:
++                    self.loading[params["requestId"]] = now
++                    self.last_request = now
++            elif event.get("method") in {"Network.loadingFinished", "Network.loadingFailed"}:
++                if self.loading.pop(params.get("requestId"), None) is not None:
++                    self.last_request = now
+ 
++    @contextlib.contextmanager
++    def draining(self):
++        """While Jev decides, drain the daemon's buffer every 20 ms, as H8b's prototype did in every round (D12)."""
++        if not self.network:
++            yield  # no input yet, so nothing is tracked
++            return
++        done = threading.Event()
++
++        def drain():
++            while not done.wait(0.02):
++                try:
++                    self._track()
++                except Exception:  # _track() marked the loss; the main thread's next drain reports a failing daemon
++                    return
++
++        thread = threading.Thread(target=drain, daemon=True)
++        thread.start()
++        try:
++            yield
++        finally:
++            done.set()
++            thread.join()
++
++    def wait_for_loading(self, stop=None):
++        """Wait while this tab visibly loads what recent inputs started. Returns [ms, capped, lost], or None."""
++        if self.input_done is None or time.monotonic() - self.input_done >= LOADING_CAP_SECONDS:
++            return None  # D9: no input yet, or the last is LOADING_CAP_SECONDS old: the freshness check decides
++        started = time.monotonic()
++        while True:
++            self._track()
++            now = time.monotonic()
++            quiet = self.last_request is None or now - self.last_request >= LOADING_QUIET_MS / 1000
++            loaded = not self.loading and quiet
++            if loaded or now - self.input_done >= LOADING_CAP_SECONDS:
++                break
++            if stop:
++                stop()  # D11: a cancellation, the run's budget or a shutdown ends the wait
++            time.sleep(0.02)
++        waited = [round((now - started) * 1000), not loaded, self.lost]
++        self.lost = False  # lost covers the drains since the last recorded wait
++        return waited
++
+     def close(self):
+         if self.target:
+             cdp("Target.closeTarget", targetId=self.target)
+--- a/jev_ultrafast/agent.py
++++ b/jev_ultrafast/agent.py
+@@ -22,7 +22,8 @@
+             raise ValueError("Supply a task")
+         self.pending_text = None
+         self.trace_path = trace_path
+-        self.before_input = None  # optional stop check before each text call and input; raising skips them
++        # optional stop check before each text call and input, and during a loading wait (§4); raising stops them
++        self.before_input = None
+         self.browser = Browser(url)
+         self.record_dir = Path(record_dir) if record_dir else None
+         self.screenshots = screenshots or bool(record_dir)
+@@ -64,6 +65,7 @@
+             text_calls=[],
+             stale_decisions=0,
+             stale_streak=0,
++            loading_waits=[],  # [ms, capped, lost] per loading wait; decision D10, docs/executor-improvements.md §4
+             attempt=None,
+             allowed_sites=sites,
+             allow_commit=allow_commit,
+@@ -136,7 +138,9 @@
+             if len(state["decisions"]) >= MAX_STEPS * 2:
+                 state["status"] = "blocked"
+                 raise ValueError("Reached the demo's model-call budget")
+-            state["decision"] = choose(state["page"], state["goal"], state["history"])
++            # Decision D12 (docs/executor-improvements.md §4): the browser drains its event buffer while Jev decides.
++            with state["browser"].draining():
++                state["decision"] = choose(state["page"], state["goal"], state["history"])
+             state["decisions"].append(
+                 {
+                     **state["decision"],
+@@ -154,6 +158,10 @@
+             state["decision"] = None
+             selected = decision["choice"]
+             if selected in {"DONE", "BLOCKED"}:
++                # Decision D6 (docs/executor-improvements.md §4): an answer given while the page still loads what recent
++                # inputs started waits for it; the freshness check below then makes it stale if the page changed.
++                if waited := state["browser"].wait_for_loading(stop=self.before_input):
++                    state["loading_waits"].append(waited)
+                 if not state["browser"].fresh(page):
+                     state["status"] = "ready"
+                     raise StalePage("Page changed since the decision. Choose again.")
+--- a/scripts/report_runs.py
++++ b/scripts/report_runs.py
+@@ -82,6 +82,9 @@
+             "runs with omitted actions": any(d["omitted_actions"] > 0 for d in decisions),
+             "site changes": len(hosts) > 1,
+             "stale decisions": run["stale_decisions"],
++            "loading wait ms": sum(waited for waited, _capped, _lost in run.get("loading_waits", [])),
++            "loading caps": sum(capped for _waited, capped, _lost in run.get("loading_waits", [])),
++            "loading event losses": sum(lost for _waited, _capped, lost in run.get("loading_waits", [])),
+             "TypeSafe input tokens": sum(d["usage"].get("input_tokens", 0) for d in decisions),
+             "text prompt tokens": sum(t["usage"].get("prompt_tokens", 0) for t in run["text_calls"]),
+             "text completion tokens": sum(t["usage"].get("completion_tokens", 0) for t in run["text_calls"]),
+--- a/tests/test_agent.py
++++ b/tests/test_agent.py
+@@ -1,9 +1,12 @@
+ """Offline contracts for a dynamic operation/target policy. No paid APIs."""
+ 
++import contextlib
+ import json
++import threading
+ import time
+ from copy import deepcopy
+ from datetime import date
++from types import SimpleNamespace
+ from unittest.mock import Mock
+ 
+ import pytest
+@@ -233,7 +236,12 @@
+     a.trace_path = None
+     a.before_input = None
+     p = page()
+-    a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p))
++    a.browser = Mock(
++        fresh=Mock(return_value=True),
++        observe=Mock(return_value=p),
++        wait_for_loading=Mock(return_value=None),
++        draining=contextlib.nullcontext,
++    )
+     # The real builder, so every state key the Agent adds is present here too.
+     a._fresh_state("Find a book", p, None)
+     a.state.update(decision=decision(), status="predicted", started_at=time.perf_counter())
+@@ -623,12 +631,13 @@
+ def test_new_goal_resets_every_counter(runner):
+     browser = runner.browser
+     runner.state.update(
+-        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5
++        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5,
++        loading_waits=[[748, False, False]],
+     )
+     runner.new_goal("  Open the cart  ", allowed_sites=["shop.test"])
+     state = runner.state
+     assert (state["history"], state["decisions"], state["text_calls"], state["stale_decisions"]) == ([], [], [], 0)
+-    assert state["stale_streak"] == 0
++    assert state["stale_streak"] == 0 and state["loading_waits"] == []
+     assert state["decision"] is None and state["status"] == "ready" and state["attempt"] is None
+     assert state["allow_commit"] is False
+     assert state["started_at"] is None and state["elapsed_ms"] == 0
+@@ -820,3 +829,374 @@
+     runner.state["allow_commit"] = True
+     act(runner, commit_probability=0.9)
+     runner.state["browser"].act.assert_called_once()
++
++
++@pytest.fixture
++def tab(monkeypatch):
++    """A real Browser on fake CDP, with a fake clock and a fake daemon event buffer that keeps the last 500 events."""
++    import jev_ultrafast.browser as browser
++
++    clock, schedule, lock, calls = {"ms": 0}, [], threading.Lock(), []
++
++    def enabled(at, event):
++        network = [ms for method, ms in calls if method == "Network.enable"]
++        own = event["session_id"] == "S" and event["method"].startswith("Network.")
++        return not own or (network and at >= network[0])
++
++    def drain_events():
++        with lock:
++            due = [event for at, event in schedule if at <= clock["ms"] and enabled(at, event)]
++            schedule[:] = [(at, event) for at, event in schedule if at > clock["ms"]]
++        return due[-500:]
++
++    def at(ms, *events):
++        with lock:
++            schedule.extend((ms, event) for event in events)
++
++    def sleep(seconds):
++        clock["ms"] += round(seconds * 1000)
++
++    monkeypatch.setattr(browser, "time", SimpleNamespace(monotonic=lambda: clock["ms"] / 1000, sleep=sleep))
++    monkeypatch.setattr(browser, "drain_events", drain_events)
++    monkeypatch.setattr(browser, "ensure_daemon", lambda **_: None)
++    monkeypatch.setattr(browser, "foreign_browser_port", lambda: None)
++    def cdp(method, session_id=None, **params):
++        calls.append((method, clock["ms"]))
++        if method == "Target.createTarget":
++            return {"targetId": "T"}
++        if method == "Target.attachToTarget":
++            return {"sessionId": "S"}
++        return {"result": {"value": "complete"}}
++
++    monkeypatch.setattr(browser, "cdp", cdp)
++    operation = Mock(return_value={})
++    monkeypatch.setattr(browser, "browser_operation", operation)
++    b = browser.Browser("https://example.test/")
++    b.fresh = Mock(return_value=True)
++    return SimpleNamespace(
++        browser=b, clock=clock, operation=operation, at=at, pending=lambda: bool(schedule), calls=calls
++    )
++
++
++def sent(request_id, kind="XHR", frame="T", session="S"):
++    params = {"requestId": request_id, "type": kind, "frameId": frame}
++    return {"session_id": session, "method": "Network.requestWillBeSent", "params": params}
++
++
++def ended(request_id, method="Network.loadingFinished"):
++    return {"session_id": "S", "method": method, "params": {"requestId": request_id}}
++
++
++def click(tab):
++    tab.browser.act(page()["actions"][2], page())
++
++
++def test_loading_wait_tracks_only_this_tabs_content_requests(tab):
++    click(tab)
++    tab.at(0, sent("user", session="OTHER"), sent("img", "Image"), sent("ad", "Document", frame="AD"))
++    tab.at(0, sent("nav", "Document"), sent("api", "Fetch"), sent("nav", "Document"))  # the second "nav": a redirect
++    tab.browser._track()
++    assert set(tab.browser.loading) == {"nav", "api"}
++    tab.at(0, ended("nav"), ended("api", "Network.loadingFailed"))
++    tab.browser._track()
++    assert tab.browser.loading == {}
++
++
++def test_loading_wait_ends_after_quiet_or_5_s_after_the_input(tab):
++    click(tab)  # nothing loading: no wait, so the freshness check decides at once
++    assert tab.browser.wait_for_loading() == [0, False, False]
++    click(tab)
++    start = tab.clock["ms"]
++    tab.at(start + 300, sent("results"))  # sent 300 ms after the click, as Google Flights does
++    tab.at(start + 1100, ended("results"))
++    tab.clock["ms"] = start + 400  # Jev's next answer: the request is in flight
++    waited, capped, lost = tab.browser.wait_for_loading()  # until 100 ms of quiet after it ends
++    assert 800 <= waited <= 820 and not capped and not lost
++    click(tab)
++    start = tab.clock["ms"]
++    tab.at(start + 300, sent("poll"))  # never ends
++    tab.clock["ms"] = start + 400
++    waited, capped, lost = tab.browser.wait_for_loading()
++    assert 4600 <= waited <= 4620 and capped  # capped 5 s after the input, not 5 s after the wait began
++
++
++def test_loading_wait_runs_at_every_answer_until_5_s_after_the_input(tab):
++    assert tab.browser.wait_for_loading() is None  # no input yet
++    click(tab)
++    assert tab.browser.wait_for_loading() == [0, False, False]
++    assert tab.browser.wait_for_loading() == [0, False, False]  # Jev's next answer after the same input: checked too
++    tab.clock["ms"] = 3000
++    tab.browser.act(page()["actions"][3], page())  # a WAIT step is not an input: the 5 s still count from the click
++    tab.clock["ms"] = 5000
++    assert tab.browser.wait_for_loading() is None  # 5 s after the click: no wait, and the freshness check decides
++    tab.clock["ms"] = 10000
++    click(tab)
++    tab.clock["ms"] = 15000  # a later goal's first answer, say
++    assert tab.browser.wait_for_loading() is None
++
++
++def test_loading_wait_stops_when_the_run_stops(tab):
++    click(tab)
++    tab.at(0, sent("results"))  # loading, so the wait polls
++    stop = Mock(side_effect=ValueError("the server is shutting down"))
++    with pytest.raises(ValueError, match="shutting down"):
++        tab.browser.wait_for_loading(stop=stop)
++    assert tab.clock["ms"] < 100
++
++
++def test_done_and_blocked_wait_for_loading_before_the_freshness_check(runner):
++    browser, calls = runner.browser, []
++    runner.before_input = Mock()
++    act(runner, "e3")
++    browser.wait_for_loading.assert_not_called()  # a CLICK does not wait
++    browser.wait_for_loading.side_effect = lambda stop: calls.append("wait") or [748, False, False]
++    browser.fresh.side_effect = lambda page: calls.append("fresh") or False
++    with pytest.raises(StalePage):  # the results loaded, so the page changed: Jev answers again
++        act(runner, "DONE")
++    assert calls == ["wait", "fresh"] and runner.state["loading_waits"] == [[748, False, False]]
++    browser.wait_for_loading.assert_called_once_with(stop=runner.before_input)
++    browser.wait_for_loading.side_effect, browser.fresh.side_effect = None, None
++    act(runner, "BLOCKED")  # the mock's None: no input in the last 5 s, and nothing recorded
++    assert runner.state["status"] == "blocked" and runner.state["loading_waits"] == [[748, False, False]]
++
++
++def test_an_input_stopped_before_it_runs_keeps_the_last_inputs_deadline(tab):
++    click(tab)
++    tab.at(100, sent("poll"))  # never ends
++    tab.clock["ms"] = 300
++    tab.operation.side_effect = StalePage("Target is covered by <div>. Observe again.")
++    with pytest.raises(StalePage):
++        click(tab)
++    waited, capped, lost = tab.browser.wait_for_loading()
++    assert 4700 <= waited <= 4720 and capped  # 5 s after the first click, not the stopped one
++
++
++def test_each_read_drains_the_buffer_so_it_cannot_overflow_before_the_answer(tab):
++    click(tab)
++    tab.at(100, sent("results"))
++    tab.at(2000, ended("results"))
++    tab.clock["ms"] = 600
++    user_tab = [sent(f"user{i}", session="OTHER") for i in range(300)]  # the daemon's other tab
++    tab.operation.side_effect = lambda request: tab.at(tab.clock["ms"], *user_tab) or {}  # events during the read
++    tab.browser.observe(screenshot=False)
++    tab.at(700, *user_tab)  # while Jev decides
++    tab.clock["ms"] = 900
++    assert tab.browser.wait_for_loading() == [1200, False, False]
++
++
++def test_requests_an_earlier_input_started_are_still_waited_for(tab):
++    click(tab)  # a search
++    tab.at(300, sent("results"))
++    tab.at(2000, ended("results"))
++    tab.clock["ms"] = 600
++    click(tab)  # another input, a scroll say, while the results still load
++    assert tab.browser.wait_for_loading() == [1500, False, False]
++    tab.at(2200, sent("poll"))  # never ends
++    tab.clock["ms"] = 2300
++    click(tab)
++    assert tab.browser.wait_for_loading() == [5000, True, False]
++    click(tab)  # the poll is now 5 s old: dropped, so nothing is loading and there is no wait
++    assert tab.browser.wait_for_loading() == [0, False, False]
++
++
++def until_drained(tab):
++    deadline = time.monotonic() + 2  # the real clock: the drain thread paces itself on it
++    while tab.pending() and time.monotonic() < deadline:
++        time.sleep(0.005)
++    assert not tab.pending()
++
++
++def test_the_buffer_drains_while_jev_decides_once_tracking_has_started(tab):
++    with tab.browser.draining():  # no input yet: nothing is tracked, so nothing drains
++        tab.at(0, sent("idle", session="OTHER"))
++        time.sleep(0.1)
++    assert tab.pending()
++    click(tab)
++    with tab.browser.draining():
++        tab.at(0, sent("results"), *[sent(f"user{i}", session="OTHER") for i in range(300)])
++        until_drained(tab)
++        tab.at(0, *[sent(f"later{i}", session="OTHER") for i in range(300)])
++        until_drained(tab)
++    assert "results" in tab.browser.loading and not tab.browser.lost  # 601 events, never 500 in one drain
++    tab.browser.wait_for_loading()  # capped 5 s after the click, since "results" never ends
++    with tab.browser.draining():  # Jev answers again after the wait: it still drains, as the prototype did
++        tab.at(tab.clock["ms"], sent("again", session="OTHER"))
++        until_drained(tab)
++
++
++def test_jev_decides_inside_the_browsers_draining(runner, monkeypatch):
++    calls = []
++
++    @contextlib.contextmanager
++    def draining():
++        calls.append("enter")
++        yield
++        calls.append("exit")
++
++    runner.browser.draining = draining
++    monkeypatch.setattr(loop, "choose", lambda *_: calls.append("choose") or decision("e3"))
++    runner.state.update(decision=None, status="ready")
++    runner.command("predict")
++    assert calls == ["enter", "choose", "exit"]
++
++
++def test_a_full_drain_marks_the_wait_as_lost(tab):
++    click(tab)
++    tab.at(100, sent("results"), *[sent(f"user{i}", session="OTHER") for i in range(600)])
++    tab.clock["ms"] = 200
++    assert tab.browser.wait_for_loading() == [0, False, True]  # "results" was dropped: nothing is seen loading
++
++
++def test_a_daemon_that_closes_without_replying_stops_with_a_clear_message(tab, monkeypatch):
++    import jev_ultrafast.browser as browser
++
++    monkeypatch.setattr(browser, "drain_events", lambda: {}["events"])
++    with pytest.raises(RuntimeError, match="daemon closed"):
++        tab.browser._track()
++
++
++def test_the_start_pages_own_requests_are_not_waited_for(tab):
++    tab.at(0, sent("long-poll"))  # the start page's own request, which never ends
++    tab.at(0, *[sent(f"user{i}", session="OTHER") for i in range(600)])  # a busy other tab fills a drain
++    tab.clock["ms"] = 100
++    tab.browser.observe(screenshot=False)
++    assert not any(method == "Network.enable" for method, _ms in tab.calls)
++    click(tab)
++    click(tab)
++    assert [method for method, _ms in tab.calls].count("Network.enable") == 1  # at the first input, once
++    assert tab.browser.wait_for_loading() == [0, False, False]
++
++
++def test_a_full_drain_before_an_input_is_recorded_in_its_wait(tab):
++    click(tab)
++    tab.at(100, *[sent(f"user{i}", session="OTHER") for i in range(600)])  # during a text call, say
++    tab.clock["ms"] = 200
++    click(tab)  # its drain before the input comes back full
++    assert tab.browser.wait_for_loading()[2] is True
++    click(tab)
++    assert tab.browser.wait_for_loading()[2] is False  # lost covers only the drains since the last recorded wait
++
++
++
++def test_draining_returns_only_after_its_thread_has_ended(tab, monkeypatch):
++    import jev_ultrafast.browser as browser
++
++    fake = browser.drain_events
++
++    def slow_drain():
++        time.sleep(0.05)  # the real clock: a drain still in flight when Jev answers
++        return fake()
++
++    monkeypatch.setattr(browser, "drain_events", slow_drain)
++    click(tab)
++    before = threading.active_count()
++    with tab.browser.draining():
++        time.sleep(0.03)
++    assert threading.active_count() == before
++
++
++def test_a_drain_that_fails_while_jev_decides_marks_the_wait_as_lost(tab, monkeypatch):
++    import jev_ultrafast.browser as browser
++
++    click(tab)
++    fake, failed = browser.drain_events, []
++
++    def timed_out():  # the daemon emptied its buffer, but its reply never came: those events are gone
++        failed.append(True)
++        raise TimeoutError("drain_events timed out after 5s waiting for the daemon")
++
++    monkeypatch.setattr(browser, "drain_events", timed_out)
++    with tab.browser.draining():
++        deadline = time.monotonic() + 2  # the real clock, as the drain thread's
++        while not failed and time.monotonic() < deadline:
++            time.sleep(0.005)
++    monkeypatch.setattr(browser, "drain_events", fake)
++    assert failed and tab.browser.wait_for_loading() == [0, False, True]
++
++
++def test_a_later_answer_waits_for_loading_that_started_after_the_first(tab):
++    click(tab)
++    assert tab.browser.wait_for_loading() == [0, False, False]  # answer 1: nothing loading yet
++    tab.at(300, sent("results"))
++    tab.at(1100, ended("results"))
++    tab.clock["ms"] = 400  # answer 2, after the same input
++    waited, capped, lost = tab.browser.wait_for_loading()
++    assert 800 <= waited <= 820 and not capped and not lost
++
++
++def test_blocked_waits_and_a_zero_wait_records_its_lost_flag(runner):
++    runner.browser.wait_for_loading.return_value = [0, False, True]
++    act(runner, "BLOCKED")
++    runner.browser.wait_for_loading.assert_called_once_with(stop=runner.before_input)
++    assert runner.state["loading_waits"] == [[0, False, True]]
++
++
++def test_network_is_enabled_before_the_first_input_runs(tab):
++    def submit(request):  # the click itself starts a navigation, 1 ms into the input
++        tab.at(tab.clock["ms"], sent("nav", "Document"))
++        tab.clock["ms"] += 1
++        return {}
++
++    tab.operation.side_effect = submit
++    click(tab)
++    tab.browser._track()
++    assert "nav" in tab.browser.loading
++
++
++def test_a_loss_before_an_answer_that_does_not_wait_is_kept(tab):
++    click(tab)
++    tab.at(100, *[sent(f"user{i}", session="OTHER") for i in range(600)])
++    tab.clock["ms"] = 200
++    tab.browser.observe(screenshot=False)  # a full drain
++    tab.clock["ms"] = 5200
++    assert tab.browser.wait_for_loading() is None  # 5 s after the input: no wait, nothing recorded
++    click(tab)
++    assert tab.browser.wait_for_loading()[2] is True
++
++
++def test_scripts_count_and_untracked_ends_do_not_hold_the_wait(tab):
++    click(tab)
++    tab.at(0, sent("js", "Script"), sent("img", "Image"))
++    tab.browser._track()
++    assert set(tab.browser.loading) == {"js"}
++    tab.at(0, ended("js"))
++    tab.browser._track()
++    tab.clock["ms"] = 300
++    tab.at(300, ended("img"))  # an image ends just before the answer
++    assert tab.browser.wait_for_loading() == [0, False, False]
++
++
++def test_a_request_that_ended_before_an_input_adds_no_quiet_after_it(tab):
++    click(tab)
++    tab.at(100, sent("suggestions"))
++    tab.at(250, ended("suggestions"))
++    tab.clock["ms"] = 300
++    click(tab)  # its drain before the input takes in the start and the end
++    assert tab.browser.wait_for_loading() == [0, False, False]
++
++
++def test_a_stopped_first_input_carries_nothing_into_the_first_that_runs(tab):
++    tab.operation.side_effect = StalePage("Target is covered by <div>. Observe again.")
++    with pytest.raises(StalePage):
++        click(tab)  # Network is enabled, but no input ran
++    tab.operation.side_effect = None
++    tab.at(100, sent("poll"))  # the start page's own request, which never ends
++    tab.clock["ms"] = 300
++    click(tab)
++    assert tab.browser.wait_for_loading() == [0, False, False]
++
++
++def test_a_drain_that_fails_in_a_read_marks_the_next_wait_as_lost(tab, monkeypatch):
++    import jev_ultrafast.browser as browser
++
++    click(tab)
++    fake = browser.drain_events
++
++    def timed_out():  # the daemon emptied its buffer, but its reply never came
++        raise TimeoutError("drain_events timed out after 5s waiting for the daemon")
++
++    monkeypatch.setattr(browser, "drain_events", timed_out)
++    with pytest.raises(TimeoutError):
++        tab.browser.observe(screenshot=False)  # §2 reads again after a TimeoutError; the loss must not vanish with it
++    monkeypatch.setattr(browser, "drain_events", fake)
++    assert tab.browser.wait_for_loading() == [0, False, True]
+--- a/tests/test_mcp_server.py
++++ b/tests/test_mcp_server.py
+@@ -2,6 +2,7 @@
+ 
+ import asyncio
+ import base64
++import contextlib
+ import fcntl
+ import importlib
+ import json
+@@ -64,6 +65,12 @@
+     def dismiss_dialog(self):
+         return self.dialog
+ 
++    def draining(self):
++        return contextlib.nullcontext()
++
++    def wait_for_loading(self, stop=None):
++        return None
++
+     def close(self):
+         self.closed = True
+ 
+--- a/tests/test_report_runs.py
++++ b/tests/test_report_runs.py
+@@ -59,7 +59,9 @@
+ 
+ 
+ def test_report_counts_false_and_missed_done(tmp_path, capsys):
+-    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)])
++    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)],
++        loading_waits=[[748, False, False], [5000, True, True]],
++    )
+     write_run(tmp_path, 2, "blocked", [("claude", True)])
+     risky = {**DECISION, "confidence": 0.3, "commit_probability": 0.7}
+     write_run(tmp_path, 3, "done", [("user", True), ("claude", False)], decisions=[risky])
+@@ -79,6 +81,9 @@
+         "pass by lowest confidence <0.5 1/1 (100%), 0.5-0.8 2/3 (67%), >=0.8 0/0",
+         "CLICK/SELECT by commit_probability <0.2 4, 0.2-0.5 0, >=0.5 1",
+         "site changes 1",
++        "loading wait ms 5748",
++        "loading caps 1",
++        "loading event losses 1",
+     ]:
+         assert expected in everything
+ 
