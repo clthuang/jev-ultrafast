@@ -16,7 +16,7 @@ changed, as §2 and §3 record.
 | Limits | LIMITS-1…2, GATE-LIMITS | Done, 2026-10-04 | Original machine: 15 named nodes / 45 variants, 422 focused tests; reviewer `browser_review` READY |
 | Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
 | Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
-| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Implemented; gate review pending | Cloud: 10 named nodes / 50 variants with `--native`, 32 native tests, `check_guards.py` 23 checks; parity and payload measurements in §4.2 |
+| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Review fixes landed; reviewer confirmation pending | Cloud: 10 named nodes / 52 variants with `--native`, 714 offline and 31 native tests, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only (S1, nits), each fix pinned by the reviewer's mutants (§4.2) |
 | Readiness | READINESS-1…3, GATE-READINESS | In progress | §4.3 |
 | Release | RELEASE-1…3, GATE-RELEASE | Not started | — |
 
@@ -139,12 +139,13 @@ offline suite and Ruff, all passing.
 
 ### 4.2 SNAPSHOT: schema-2 snapshots
 
-Measured on the current code with a synthetic page (one form, 6,000-character shared context): one observation of
+Measured before schema 2 with a synthetic page (one form, 6,000-character shared context): one observation of
 250 / 1,000 / 5,000 buttons serializes to 1.60 / 6.22 / 30.90 MB, almost all per-action guards (each carries its
 scope's text, and guards are built before the 250-action cap). Every global freshness check re-runs the whole snapshot
-and returns a 25 KB–1 MB marker. The same pages' schema-2 observation is about 52 KB.
+and returns a 25 KB–1 MB marker. Schema 2's observation of the same pages measures 38 KB in Chromium (below).
 
-**In-page protocol** (`snapshot.js` becomes a side-effect-free library returning `observe`, `fresh`, `reference`):
+**In-page protocol** (`snapshot.js` is a side-effect-free library exposing `observe`, `fresh`, `target` and
+`select`; `reference`, which resolves an offered action to its retained node, is internal to them):
 
 - One `scan()` shared by observe and fresh: today's candidate rules, weak IDs only (a `WeakMap`), no retention.
 - `observe` offers the first 250 target actions, builds guards only for those nodes (each distinct scope's text read
@@ -152,13 +153,17 @@ and returns a 25 KB–1 MB marker. The same pages' schema-2 observation is about
   as today), the page/form key, guards, deduplicated scopes and the offered action JSON. Strong references (`nodes`)
   cover only offered targets and their offered options (≤ 500). The reply carries `snapshot_schema: 2` and an
   `observation_token` `{schema, epoch, generation, document_id}` instead of `marker`/`page_key`/`guards`.
-- The reply is measured in the page with `TextEncoder.encodeInto` against 262,144 bytes. Over the ceiling, the page
-  drops its baseline and retained nodes and returns only a `snapshot_too_large` envelope with counts — no actions, no
-  token, no truncated labels. Success and overflow are each a single commit point (`generation += 1`).
+- The reply is measured in the page with `TextEncoder.encodeInto` against 262,144 serialized UTF-8 bytes. Over the
+  ceiling, the page drops its baseline and retained nodes and returns only a `snapshot_too_large` envelope with
+  counts — no actions, no token, no truncated labels. Success and overflow are each a single commit point
+  (`generation += 1`). The ceiling bounds the serialized reply, not CDP's wire message: Chrome escapes every non-ASCII
+  character, so a reply can be up to about 3× larger on the wire (2-byte scripts and emoji); a page measured at
+  87,879 bytes arrived as 155,185.
 - `fresh(token, action)` is read-only: it never installs a baseline, advances the generation or retains a node; no
   cache, another epoch, an old generation or another document all return false. CLICK/SELECT compare the page key and
   that action's one guard against the baseline; every other check compares the full global marker string.
-- CLICK/fill hit-testing and the SELECT evaluation resolve their node through `reference(token, action)`; the SELECT
+- CLICK/fill hit-testing (`target`) and the SELECT evaluation (`select`) each check the token themselves and resolve
+  their node through `reference`, which accepts only the exact action JSON the read offered; the SELECT
   payload becomes `{action, token}` with its validation, assignment and one input/change pair still in one synchronous
   evaluation, plus a tagged pre-input `snapshot_too_large` result.
 
@@ -185,6 +190,40 @@ the frozen schema-1 script (`git show c8a467c:jev_ultrafast/snapshot.js`) on the
 native SELECT test, and record bytes, guard builds, scope reads and references for dense pages. Known consequences:
 every observe advances the generation, so a decision becomes stale after any re-observe (READINESS must use non-installing
 reads); a real page with very long labels can now stop with `snapshot_too_large` instead of transferring megabytes.
+
+**Native evidence (Chromium 141 headless, owned lab).** Payloads, schema 2 against the frozen schema-1 script in its
+own tab, 3 warmups then 10 alternating samples, every attempt kept:
+
+| Controls | Schema 2 reply | Schema 1 reply | Schema 2 work per read |
+| --- | --- | --- | --- |
+| 250 | 38,123 B | 1.58 MB | 250 guards, 1 scope read, 250 references |
+| 1,000 | 38,046 B | 6.21 MB | same |
+| 5,000 | 37,923 B | 30.89 MB | same |
+
+Schema 1 builds a guard for every control. At 5,000 controls every schema-1 end-to-end sample hits the 5 s IPC
+timeout and only 4 of 10 in-page samples complete, and one schema-2 sample (514 ms against an 84 ms median) directly
+follows two schema-1 timeouts, likely leftover schema-1 work in the shared renderer: cite these latencies only with
+that caveat. Parity: on all 17 mutations both schemas give the same outcome for the CLICK guard, the row-scoped CLICK
+guard, the global check and SELECT, offer the same actions (the same fingerprint) and count the same changes as
+progress (`test_snapshot_freshness_parity`).
+
+**Gate review (`browser_review`, frozen at `a4ae446`): HOLD, no blockers.** The reviewer reproduced every safety,
+parity and bounds claim (56 mutants; 47 caught) and found tests missing, not code defects:
+
+| ID | Finding (severity) | Resolution |
+| --- | --- | --- |
+| S1 | Three in-page checks had no test: the offered-JSON check in `reference()` and in `select()`, and `target()`'s own token check; deleting any passed both suites (should-fix) | `test_forged_actions_with_a_current_token_never_run` (eight forgeries, one field each, with the current token: no input, no event, the baseline unchanged) and `test_a_token_that_goes_stale_after_the_freshness_check_runs_no_input` (a read between the freshness check and the hit test) |
+| N1 | The exact ceiling, the overflow reply's keys, the details filter and the malformed-read check were unpinned | `test_the_byte_ceiling_is_exact` (a reply of exactly the ceiling fits, one byte less overflows with only schema and counts) and `test_only_counts_or_a_well_formed_read_reach_python` |
+| N2 | The ceiling bounds serialized bytes, not wire bytes | Worded so above |
+| N3 | The native proof did not compare offered actions or progress across schemas | Added to `test_snapshot_freshness_parity` |
+| N4 | Two adapter paths untested: an overflow during the server's own loop, and before a TYPE_TEXT's text is generated | Two stages of `test_overflow_is_terminal_at_each_adapter`; the text model is never asked |
+| N5 | `measure_flights.py` hid the real error when measuring a revision without `SnapshotTooLarge` | It catches the class only where it exists |
+| N6, N7 | Measurement hygiene at 5,000 controls; this section named `reference` as exposed and the ledger was stale | Caveat and wording above |
+
+The reviewer's seven surviving mutants of S1 and N1 (J07, J08, J09, J11, J38, P19, P20) are each caught by these
+tests; J26 and P09 are equivalent mutants. Commands at the fixing commit, on a clean copy of it:
+`scripts/plan_tests.py SNAPSHOT --native` (10 nodes / 52 variants), the full offline suite (714) and Ruff, all
+passing; the full native suite in a fresh lab (31) passes.
 
 ### 4.3 READINESS: page readiness on an owned event source
 

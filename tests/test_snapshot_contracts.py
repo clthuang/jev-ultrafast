@@ -2,15 +2,12 @@
 
 import hashlib
 import json
-import queue
-import subprocess
-import threading
 import time
 from copy import deepcopy
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from node_page import FIXTURES, NodePage
 
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser, demo, mcp_server, model
@@ -18,7 +15,6 @@ from jev_ultrafast.browser import SnapshotTooLarge, StalePage
 from jev_ultrafast.contracts import RunStopped, operation_for
 from scripts import report_runs
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # The schema-1 snapshot, frozen from c8a467c (sha256 1103ab58…, the SELECT-stage checkpoint).
 SCHEMA1 = (FIXTURES / "snapshot_schema1.js").read_text()
 TARGETS = {"click", "fill", "select"}
@@ -26,58 +22,6 @@ OPERATIONS = ["CLICK", "TYPE_TEXT", "SELECT", "SCROLL_UP", "SCROLL_DOWN", "WAIT"
 # One label of 300,000 UTF-8 bytes: no observation of the page fits the ceiling, and none may truncate it.
 OVERSIZE = "dom.controls[0].childNodes[0].textContent='€'.repeat(100000)"
 RESTORE = "dom.controls[0].childNodes[0].textContent='Control 1'"
-
-
-class NodePage:
-    """One fake page in Node: every Runtime.evaluate runs browser.py's exact expression there. Records each call."""
-
-    def __init__(self, **config):
-        self.calls, self.reply_bytes = [], []
-        self.process = subprocess.Popen(
-            ["node", str(FIXTURES / "page_bridge.cjs"), str(FIXTURES / "dense_dom.cjs"), json.dumps(config)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
-        )
-        self.lines = queue.Queue()
-        threading.Thread(target=self._read, daemon=True).start()
-
-    def _read(self):
-        for line in self.process.stdout:
-            self.lines.put(line)
-        self.lines.put(None)
-
-    def reply(self, expression):
-        self.process.stdin.write(json.dumps({"expression": expression}) + "\n")
-        self.process.stdin.flush()
-        line = self.lines.get(timeout=60)
-        assert line is not None, "the Node page exited"
-        reply = json.loads(line)
-        if "value" in reply:  # the exact UTF-8 bytes of JSON.stringify(value), as the page measures them
-            self.reply_bytes.append(len(line.encode()) - len('{"value":}\n'))
-        return reply
-
-    def evaluate(self, expression):
-        reply = self.reply(expression)
-        assert "exception" not in reply, reply.get("exception")
-        return reply.get("value")
-
-    def cdp(self, method, session_id=None, **params):
-        params.pop("_response_timeout", None)
-        self.calls.append((method, params))
-        if method == "Runtime.evaluate":
-            reply = self.reply(params["expression"])
-            if "exception" in reply:
-                return {"exceptionDetails": {"text": reply["exception"]}}
-            return {"result": {"value": reply["value"]} if "value" in reply else {}}
-        if method == "Page.captureScreenshot":
-            return {"data": "eA=="}
-        return {}
-
-    def inputs(self):
-        return [params for method, params in self.calls if method.startswith("Input.")]
-
-    def close(self):
-        self.process.stdin.close()
-        self.process.wait(timeout=10)
 
 
 @pytest.fixture
@@ -354,6 +298,104 @@ def test_strong_references_cover_only_offered_targets(open_page):
     assert page.evaluate("__jevFast.nodes.size") == 0 and baseline(page) is None
 
 
+def forgeries(observed):
+    """Actions this read never offered, each one field away from one it did, sent with the current token."""
+    click, other, fill, second = (target(observed, "Control 1"), target(observed, "Control 2"),
+                                  target(observed, "Query"), option(observed))
+    return {
+        "click: another offered node under this ID": {**click, "node": other["node"]},
+        "click: this node under another ID": {**click, "id": other["id"]},
+        "click: relabelled": {**click, "label": "Delete account"},
+        "click: an extra key": {**click, "extra": 1},
+        "fill: another offered node under this ID": {**fill, "node": click["node"]},
+        "select: under another action's ID": {**second, "id": click["id"]},
+        "select: relabelled": {**second, "label": "Category → Other"},
+        "select: another option": {**second, "option": {**second["option"],
+                                                       "option_id": second["option"]["option_id"] + 1}},
+    }
+
+
+def test_forged_actions_with_a_current_token_never_run(open_page):
+    """The page runs only the exact action JSON its read offered under that token: the freshness check, the hit
+    test and the SELECT each refuse anything else, read-only, before any input (preparation: protocol.fresh)."""
+    page, tab = open_page(n=3, field=True, select=True)
+    observed = tab.observe(screenshot=False)
+    before, token = baseline(page), json.dumps(observed["observation_token"])
+    for name, action in forgeries(observed).items():
+        if action["kind"] == "click":
+            assert tab.fresh(observed, action) is False, name
+        if action["kind"] in {"click", "fill"}:
+            assert page.evaluate(f"{browser.TARGET}({token},{json.dumps(action)})") is None, name
+        with pytest.raises(StalePage):
+            tab.act(action, observed, text="new")
+    assert page.inputs() == [] and baseline(page) == before
+    assert page.evaluate("[dom.select.selectedIndex,dom.events,dom.field.value]") == [0, [], "old"]
+    # The offered actions themselves still run: nothing above was refused for another reason.
+    assert tab.act(option(observed), observed) == {"executed": option(observed)["id"]}
+
+
+def test_a_token_that_goes_stale_after_the_freshness_check_runs_no_input(open_page, monkeypatch):
+    """The hit test checks the token itself: another observation between Browser.act's freshness check and the
+    hit test leaves the CLICK or fill nothing to run."""
+    page, tab = open_page(n=3, field=True)
+
+    def observe_between(method, session_id=None, **params):
+        if method == "Runtime.evaluate" and params["expression"].startswith(browser.TARGET):
+            page.evaluate(browser.READ_STATE)  # another reader observes after the freshness check passed
+        return page.cdp(method, session_id, **params)
+
+    monkeypatch.setattr(browser, "cdp", observe_between)
+    for label in ("Control 1", "Query"):
+        observed = tab.observe(screenshot=False)
+        assert tab.fresh(observed, target(observed, label)) is True
+        with pytest.raises(StalePage):
+            tab.act(target(observed, label), observed, text="new")
+    assert page.inputs() == [] and page.evaluate("dom.field.value") == "old"
+
+
+@pytest.mark.parametrize("labels", [0, 200])
+def test_the_byte_ceiling_is_exact(open_page, labels):
+    """A reply of exactly the ceiling fits; one byte less overflows, with the schema and counts only."""
+    page, _tab = open_page(n=300, labelChars=labels, multibyte=True, select=True)
+    size = page.evaluate(f"new TextEncoder().encode(JSON.stringify({browser.READ_STATE})).length")
+    fits = page.evaluate(f"({browser.LIBRARY}).observe({{max_bytes:{size}}})")
+    assert "snapshot_too_large" not in fits and page.reply_bytes[-1] == size  # exactly the ceiling: it fits
+    over = page.evaluate(f"({browser.LIBRARY}).observe({{max_bytes:{size - 1}}})")
+    assert set(over) == {"snapshot_schema", "snapshot_too_large"}
+    assert over["snapshot_too_large"]["limit"] == size - 1 and baseline(page) is None
+
+
+def test_only_counts_or_a_well_formed_read_reach_python(monkeypatch):
+    """An overflow keeps only its integer counts; a read without a valid token, without an action list or with more
+    than 250 targets is stale before any screenshot."""
+    details = SnapshotTooLarge({"limit": 262_144, "characters": 300_000, "candidates": True, "evidence": "3",
+                                "label": "€" * 10, "observation_token": {"generation": 1}}).details
+    assert details == {"limit": 262_144, "characters": 300_000}
+    assert SnapshotTooLarge(["not", "counts"]).details == SnapshotTooLarge().details == {}
+    token = {"schema": 2, "epoch": "e", "generation": 1, "document_id": 1.5}
+    well_formed = {"snapshot_schema": 2, "observation_token": token, "url": "http://fixture.test/", "text": "",
+                   "scroll": {"y": 0}, "actions": [{"id": f"e{i}", "kind": "click", "node": i} for i in range(250)]}
+    calls = []
+
+    def reply(value):
+        def cdp(method, session_id=None, **params):
+            calls.append(method)
+            return {"result": {"value": value}} if method == "Runtime.evaluate" else {"data": "eA=="}
+        return cdp
+
+    for value in ({**well_formed, "observation_token": {**token, "generation": 0}},
+                  {**well_formed, "actions": "e1"},
+                  {**well_formed, "actions": [*well_formed["actions"], {"id": "e251", "kind": "fill", "node": 251}]}):
+        calls.clear()
+        monkeypatch.setattr(browser, "cdp", reply(value))
+        with pytest.raises(StalePage, match="malformed"):
+            browser.browser_operation({"operation": "observe", "session": "s", "screenshot": True})
+        assert calls == ["Runtime.evaluate"]
+    monkeypatch.setattr(browser, "cdp", reply(deepcopy(well_formed)))
+    read = browser.browser_operation({"operation": "observe", "session": "s", "screenshot": True})
+    assert read["fingerprint"] == browser.fingerprint(well_formed) and read["screenshot"] == "eA=="
+
+
 def scripted(monkeypatch, choices, before=None):
     """choose() without a model: each call answers the next choice; before(page) runs first. Returns the calls."""
     calls, pending = [], list(choices)
@@ -401,8 +443,8 @@ def overflow_elsewhere(page):
 
 @pytest.mark.parametrize("stage", [
     "setup", "new goal, unfinished run", "new goal, finished run", "predict read", "predict freshness",
-    "recovery read", "before CLICK input", "before SELECT input", "after one logged input", "MCP final read after DONE",
-    "MCP final read after BLOCKED", "inspector",
+    "recovery read", "before CLICK input", "before SELECT input", "before text generation", "after one logged input",
+    "MCP run, after one logged input", "MCP final read after DONE", "MCP final read after BLOCKED", "inspector",
 ])
 def test_overflow_is_terminal_at_each_adapter(open_page, monkeypatch, tmp_path, capsys, stage):
     if stage == "setup":
@@ -471,6 +513,41 @@ def test_overflow_is_terminal_at_each_adapter(open_page, monkeypatch, tmp_path, 
         assert len(calls) == 1 and agent.state["attempt"] is None and agent.state["history"] == []
         assert page.evaluate("[dom.select.selectedIndex,dom.events]") == [0, []]
         assert_stopped(agent, page, [])
+        return
+    if stage == "before text generation":  # a TYPE_TEXT whose read is gone before its text is asked for
+        calls = scripted(monkeypatch, [target(observed, "Query")["id"]])
+        agent.command("predict")
+        overflow_elsewhere(page)
+        with pytest.raises(SnapshotTooLarge):
+            agent.command("act", {"fingerprint": observed["fingerprint"]})
+        loop.field_text.assert_not_called()
+        assert len(calls) == 1 and agent.state["text_calls"] == [] and agent.state["attempt"] is None
+        assert page.evaluate("dom.field.value") == "old"
+        assert_stopped(agent, page, [])
+        return
+    if stage == "MCP run, after one logged input":  # the server's own loop, from a new goal in the same tab
+        (tmp_path / "runs").mkdir()
+        monkeypatch.setattr(mcp_server, "RUNS", tmp_path / "runs")
+        monkeypatch.setattr(mcp_server, "notes_block", lambda _state: ("", []))
+        monkeypatch.setattr(mcp_server, "AGENT", agent)
+        monkeypatch.setattr(mcp_server.anyio.from_thread, "check_cancelled", lambda: None)
+
+        def grows_after_click(method, session_id=None, **params):
+            result = page.cdp(method, session_id, **params)
+            if method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
+                page.evaluate(OVERSIZE)
+            return result
+
+        monkeypatch.setattr(browser, "cdp", grows_after_click)
+        calls = scripted(monkeypatch, [click["id"], "DONE"])
+        agent.state["status"] = "done"  # an earlier run in this tab finished; this one continues there
+        [text, *_image] = mcp_server.start_run("Open it", None, OPERATIONS, None, False)
+        [saved] = (tmp_path / "runs").glob("*.json")
+        run = json.loads(saved.read_text())
+        assert run["status"] == "stopped" and run["stop_code"] == "snapshot_too_large" and "stopped" in text
+        assert len(run["history"]) == 1 and run["history"][0]["page_changed"] is None and len(calls) == 1
+        assert run["final_read_fresh"] is False and run["decision"] is None
+        assert [params["type"] for params in page.inputs()] == ["mousePressed", "mouseReleased"]
         return
     if stage == "after one logged input":  # the click runs; the page it opens is too large to read
         calls = scripted(monkeypatch, [click["id"]])

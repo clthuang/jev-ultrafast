@@ -324,9 +324,18 @@ def schema2_outcomes(instance, url, mutation):
     return outcome
 
 
+def progress(instance, url, mutation, read):
+    """A fresh document's fingerprint under one schema, and whether the mutation changes it."""
+    load(instance, url)
+    before = read()
+    mutate(instance, url, mutation)
+    return before, read() != before
+
+
 def test_snapshot_freshness_parity(tab_pair, lab_manifest, request):
     """Every change schema 1 rejected, schema 2 rejects too, scoped and global checks compared separately; SELECT
-    identity only adds rejections. What schema 1 accepted for a CLICK stays accepted where the guard is unchanged."""
+    identity only adds rejections. What schema 1 accepted for a CLICK stays accepted where the guard is unchanged.
+    Both schemas offer the same actions, so the same fingerprint, and count the same changes as progress."""
     url = lab_manifest["fixture_url"] + "/snapshot_parity.html"
     first, second = tab_pair
     results = {}
@@ -335,6 +344,14 @@ def test_snapshot_freshness_parity(tab_pair, lab_manifest, request):
         results[mutation] = {"schema 1": baseline, "schema 2": candidate}
         for check in ("click", "click in a row", "global", "select"):
             assert baseline[check] or not candidate[check], (mutation, check, baseline, candidate)
+        old = progress(first, url, mutation, lambda: browser.fingerprint(first.evaluate(SCHEMA1)))
+        new = progress(second, url, mutation, lambda: second.observe(screenshot=False)["fingerprint"])
+        assert old == new, mutation
+        results[mutation]["progress"] = new[1]
+    for mutation in ("geometry within the viewport", "scroll height"):
+        assert results[mutation]["progress"], mutation
+    for mutation in ("unchanged", "title", "offscreen form property", "omitted control"):
+        assert not results[mutation]["progress"], mutation
     accepted = {"unchanged", "geometry within the viewport", "unrelated visible text", "omitted control", "title",
                 "scroll height", "duplicate labels reordered"}
     for mutation in accepted:
