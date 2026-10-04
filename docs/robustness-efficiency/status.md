@@ -315,7 +315,7 @@ YouTube) and H5's arXiv repeats, which need live sites and paid models; they rem
 
 ## 5. Checkpoint and how to resume (2026-10-04)
 
-Work stopped here because the session's credit ran low. Everything is committed and pushed on
+Summary for the owner, with every decision needed: [handover.md](handover.md). Work stopped here because the session's credit ran low. Everything is committed and pushed on
 `claude/busy-edison-lx8bhh` (draft PR #2). Nothing below has been started beyond what it says.
 
 **State at the checkpoint.**
