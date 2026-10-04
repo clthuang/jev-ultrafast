@@ -1,6 +1,8 @@
 # Implementation plan: robustness and efficiency
 
-Status: ready for implementation. Plan revision 2, 2026-10-03; all implementation tasks and gates are not started.
+Status: in implementation. Plan revision 2, 2026-10-03. Each task's state, evidence and the cloud execution notes are in
+[robustness-efficiency/status.md](robustness-efficiency/status.md); the per-task "Not started" wording below is the
+plan's starting state.
 
 Source: [reviewed design, revision 3](robustness-efficiency-proposal.md) and its
 [review/validation/premortem](robustness-efficiency-review.md).
