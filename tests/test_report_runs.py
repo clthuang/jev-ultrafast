@@ -549,3 +549,13 @@ def test_malformed_history_does_not_hide_valid_reports(tmp_path, capsys, broken)
     text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
     assert 'reviews: 1, 0 failed, cost $0.1000' in text
     assert 'invalid review record' in capsys.readouterr().err
+
+
+def test_an_unreadable_run_file_is_named_by_its_error_type_only(tmp_path, capsys):
+    """A decode error's message quotes the file: an excluded run's goal and typed text could follow it."""
+    write_run(tmp_path, 1)
+    (tmp_path / "20260924-100002-abcd.json").write_bytes(b'{"goal": "Typedcanary search \xff", "history": []}')
+    report_runs.main(["--runs", str(tmp_path)])
+    output = capsys.readouterr()
+    assert "skipped 20260924-100002-abcd.json: UnicodeDecodeError" in output.err
+    assert "Typedcanary" not in output.out + output.err

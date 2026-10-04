@@ -140,6 +140,11 @@ def clip(text, limit=TEXT_CHARACTERS):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def clip_quoted(text, quote, limit=TEXT_CHARACTERS):
+    """text quoted, clipped, and quoted again: a cut can end a longer word right after a value, making it whole."""
+    return quote(clip(quote(text), limit))
+
+
 def money(cost):
     return f"${cost:.4f}" if isinstance(cost, (int, float)) else "unknown"
 
@@ -489,13 +494,15 @@ def summaries(queue):
 MAX_BATCH_RUNS = 25
 MAX_BATCH_NOTES = 5
 MAX_BATCH_BYTES = 65_536
-DEFERRED_REASONS = {"item_cap": "over the batch's item limit", "byte_cap": "over the batch's byte limit"}
+DEFERRED_REASONS = review_records.DEFERRED_REASONS
 
 
-def membership_lines(batch):
-    """What a batch sends and what it left for a later batch: IDs, version prefixes and reasons, never content."""
-    lines = [f"input: {item['kind'][:-1]} {item['id']} @{item['version'][:8]}" for item in batch["items"]]
-    lines += [f"deferred: {item['kind'][:-1]} {item['id']} ({DEFERRED_REASONS[item['reason']]})"
+def membership_lines(batch, quote):
+    """What a batch sends and what it left for a later batch: IDs, version prefixes and reasons, never content. Every
+    ID goes through the batch's privacy quote: the batch names only its own items, so a deferred ID that holds a task
+    value, as a note on a site someone typed does, shows <value> in its place."""
+    lines = [f"input: {item['kind'][:-1]} {quote(item['id'])} @{item['version'][:8]}" for item in batch["items"]]
+    lines += [f"deferred: {item['kind'][:-1]} {quote(item['id'])} ({DEFERRED_REASONS[item['reason']]})"
               for item in batch["deferred"]]
     return lines
 
@@ -510,6 +517,10 @@ class DecisionRefused(ValueError):
 
 class ReviewBusy(ValueError):
     """Another process holds the reviews' lock."""
+
+
+class ReplyConflict(ValueError):
+    """A different reply is already committed for this batch; this one changes nothing."""
 
 
 class RecoveryPending(OSError):
@@ -566,8 +577,9 @@ def dependency_record(queue):
     }
 
 
-def _prepare_batch(since=None):
-    """Caller owns review lock; retain metadata/notes locks only during preparation."""
+def _prepare_batch(since=None, membership=None):
+    """Caller owns review lock; retain metadata/notes locks only during preparation. membership, when given, receives
+    the batch's membership_lines()."""
     with run_store.metadata_lock(RUNS, create=True):
         def prepare(envelope):
             queue = build_queue(since, all_runs=load_runs(), notes=envelope["notes"],
@@ -606,14 +618,16 @@ def _prepare_batch(since=None):
             folder = REVIEWS / "batches"
             folder.mkdir(parents=True, exist_ok=True)
             store_io.publish(folder / f"{batch['batch_id']}.json", batch, immutable=True)
+            if membership is not None:
+                membership.extend(membership_lines(batch, privacy_quote(selected)))
             return batch
         return site_notes.transaction(prepare, write=False)
 
 
-def prepare_batch(since=None):
+def prepare_batch(since=None, membership=None):
     with review_lock():
         recover_or_stop()
-        return _prepare_batch(since)
+        return _prepare_batch(since, membership)
 
 
 def load_batch(batch_id):
@@ -655,7 +669,7 @@ def schema_errors(value, schema, where="reply", quote=str):
     if isinstance(value, dict):
         errors = [f"{where} lacks {key}" for key in schema["required"] if key not in value]
         if schema.get("additionalProperties") is False:
-            unknown = [clip(quote(key), LABEL_CHARACTERS) for key in value if key not in schema["properties"]]
+            unknown = [clip_quoted(key, quote, LABEL_CHARACTERS) for key in value if key not in schema["properties"]]
             errors += [f"{where} has an unknown key {key}" for key in unknown]
         for key, part in schema["properties"].items():
             if key in value:
@@ -692,7 +706,10 @@ def without_values(value, values, kept, run_ids):
 def unapproved(notes, note_id):
     note = next((note for note in notes if note["id"] == note_id), None)
     if note is None:
-        raise DecisionRefused(f"no note {clip(note_id, LABEL_CHARACTERS)}")
+        # The whole ID passed the value check; a clipped one could end a longer word right after a value, so a long
+        # ID is not repeated.
+        raise DecisionRefused(f"no note {note_id}" if len(note_id) <= LABEL_CHARACTERS else
+                              f"no note with that ID, which is over {LABEL_CHARACTERS} characters")
     if note["approved"]:
         raise DecisionRefused(
             f"{note_id} is approved, and a review never retires, flags or changes a note you approved")
@@ -717,7 +734,14 @@ def apply_decision_to(notes, decision, queue):
                 "url": site_notes.note_url(chain) if decision["hint"] == "start_at_url" else None,
                 "failure": next((failure_of(chain[key]) for key in reversed(failures) if failure_of(chain[key])), None),
                 "runs": {"failed": failures, "recovered": recovered}}
-        if refusals := site_notes.check_note(note, chain, queue["exclude"]):
+        # Checked as the server checks a lesson, over the whole chain with its excluded runs; and the URL code derives
+        # from the run against every value of the batch's privacy closure, which links across sites too.
+        whole = next((runs for runs in site_notes.chains(queue["all_runs"]) if recovered in runs), chain)
+        refusals = site_notes.check_note(note, whole, queue["exclude"])
+        if (site_notes.url_holds(note["url"], site_notes.task_value_pattern(queue["values"]))
+                and site_notes.VALUE_REFUSAL not in refusals):
+            refusals.append(site_notes.VALUE_REFUSAL)
+        if refusals:
             raise DecisionRefused("; ".join(refusals))
         try:
             return "added " + site_notes.add_note_to(notes, note)
@@ -754,12 +778,25 @@ def ensure_digest(receipt):
     return path
 
 
-def recover_or_stop(*, committed_now=False):
-    """recover_pending(), turning a storage or record failure into RecoveryPending: never "nothing changed"."""
+def recover_or_stop(*, committed_now=False, batch_id=None, reply_hash=None):
+    """recover_pending(), turning a storage or record failure into RecoveryPending: never "nothing changed". A
+    retained receipt for this batch and this reply means its decisions are the ones committed."""
     try:
         return recover_pending()
     except (OSError, review_records.RecordError) as error:
-        raise RecoveryPending(committed_now) from error
+        raise RecoveryPending(committed_now or pending_is(batch_id, reply_hash)) from error
+
+
+def pending_is(batch_id, reply_hash):
+    """True when the retained receipt is this batch's, for this reply; False when it is another's or unreadable."""
+    if batch_id is None:
+        return False
+    try:
+        receipt = site_notes.transaction(lambda envelope: envelope["pending_review"], write=False)
+    except Exception:  # an unreadable store cannot show whose receipt it keeps
+        return False
+    return (isinstance(receipt, dict) and receipt.get("batch_id") == batch_id
+            and receipt.get("reply_sha256") == reply_hash)
 
 
 def recover_pending():
@@ -779,12 +816,12 @@ def recover_pending():
 def _apply_batch(batch, reply, cost=None, attempt_id=None):
     """Caller holds review lock; notes+receipt is the sole decision commit point."""
     reply_hash = review_records.digest(reply)
-    recover_or_stop()
+    recover_or_stop(batch_id=batch["batch_id"], reply_hash=reply_hash)
     path = committed_path(batch["batch_id"])
     if path.exists():
         existing = review_records.read(path, "digest")
         if existing["reply_sha256"] != reply_hash:
-            raise ValueError("A different reply already committed for this batch")
+            raise ReplyConflict("A different reply already committed for this batch")
         return path, []
     with run_store.metadata_lock(RUNS, create=True):
         runs, exclude = load_runs(), site_notes.read_exclude(site_notes.EXCLUDE_PATH)
@@ -839,10 +876,12 @@ def _apply_batch(batch, reply, cost=None, attempt_id=None):
             return None, prepared["problems"]
     # Notes and receipt are committed: a failure from here on leaves the receipt as the record, pending recovery.
     # Never replay decisions, and never report this reply as not applied.
-    recover_or_stop(committed_now=True)
     try:
+        recover_or_stop(committed_now=True)
         digest = review_records.read(path, "digest")
-    except review_records.RecordError as error:
+    except RecoveryPending:
+        raise
+    except Exception as error:  # whatever fails after the commit point, the receipt is the record
         raise RecoveryPending(True) from error
     for number, record in enumerate(digest["decisions"], 1):
         result = "applied" if record["applied"] else "refused"
@@ -921,9 +960,9 @@ def start_failure(init, quote=str):
         return "the stream's first event is not its init event"
     tools, servers = init.get("tools"), init.get("mcp_servers")
     if not isinstance(tools, list) or any(tool != STRUCTURED_OUTPUT_TOOL for tool in tools):
-        return f"the session has tools beyond {STRUCTURED_OUTPUT_TOOL}: {clip(quote(tools))}"
+        return f"the session has tools beyond {STRUCTURED_OUTPUT_TOOL}: {clip_quoted(tools, quote)}"
     if servers != []:
-        return f"the session has MCP servers: {clip(quote(servers))}"
+        return f"the session has MCP servers: {clip_quoted(servers, quote)}"
     return None
 
 
@@ -973,7 +1012,7 @@ def launch(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit
                     start_new_session=True,  # its own group: it outlives the server, and one signal stops all of it
                 )
             except OSError as error:
-                return {}, None, f"claude did not start: {clip(quote(error))}"
+                return {}, None, f"claude did not start: {clip_quoted(error, quote)}"
         process._review_identity = process_identity(process.pid)
         process._review_signal_lock = RLock()
         process._review_reaped = False
@@ -1022,7 +1061,8 @@ def launch(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit
                 wait_for_child(process, EXIT_SECONDS)
             process.stdout.close()
             if on_exit:
-                on_exit(process)
+                with contextlib.suppress(Exception):  # settlement verifies the exit again; the reply and cost stay
+                    on_exit(process)
         if failure is None and result is None:
             failure = (
                 f"no result within {REVIEW_TIMEOUT_MINUTES} minutes"
@@ -1037,8 +1077,8 @@ def launch(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit
 def result_failure(result, quote=str):
     """Why a result event counts as a failed review (cli-facts.md), or None."""
     if result.get("subtype") != "success" or result.get("is_error"):
-        return (f"the review ended with {clip(quote(result.get('subtype')), LABEL_CHARACTERS)}: "
-                f"{clip(quote(result.get('result')), LABEL_CHARACTERS)}")
+        return (f"the review ended with {clip_quoted(result.get('subtype'), quote, LABEL_CHARACTERS)}: "
+                f"{clip_quoted(result.get('result'), quote, LABEL_CHARACTERS)}")
     return None
 
 
@@ -1088,7 +1128,9 @@ def read_state():
             or type(state.get("failures", 0)) is not int
             or type(state.get("next_due", 0)) not in (int, float)
             or not math.isfinite(state.get("next_due", 0))
-            or type(state.get("off", False)) is not bool):
+            or type(state.get("off", False)) is not bool
+            or state.get("running") is not None and not isinstance(state["running"], str)
+            or state.get("last_start") is not None and not review_records.valid_time(state["last_start"])):
         raise review_records.RecordError("Unsupported review state; paid dispatch stopped")
     return {"schema_version": 1, "accounted_attempt_ids": [], **state}
 
@@ -1114,7 +1156,9 @@ def group_alive(pgid):
         return None
 
 
-def child_exited(attempt, now):
+def child_exited(attempt):
+    """True only when no process of the attempt's reviewer can run: it never spawned, its exit is recorded, or its
+    leader is gone and no process is left in its group. It never signals."""
     child = attempt.get("child")
     if attempt["status"] == "claimed" and child is None:
         return True  # durable claim explicitly precedes any spawn attempt
@@ -1122,17 +1166,26 @@ def child_exited(attempt, now):
         return False  # spawning may have succeeded before its PID was recorded
     if child.get("exited") is True:
         return True
+    pid = child.get("pid")
+    if type(pid) is not int or pid <= 1:
+        return False
+    return process_identity(pid).get("state") == "absent" and group_alive(pid) is False
+
+
+def expired_owned(attempt, now):
+    """True when the attempt's deadline has passed and its reviewer still runs under its exact recorded identity."""
+    child = attempt.get("child") or {}
     pid, identity = child.get("pid"), child.get("identity")
-    if type(pid) is not int or pid <= 0:
-        return False
-    current = process_identity(pid)
-    if current.get("state") == "absent":
-        return group_alive(pid) is False
-    if not identity or current != identity or identity.get("pgid") != pid:
-        return False
-    if now < attempt["deadline"]:
-        return False
-    # Verify identity immediately before each signal; never kill a reused PID.
+    return (now >= attempt["deadline"] and type(pid) is int and pid > 1 and isinstance(identity, dict)
+            and identity.get("state") == "present" and identity.get("pgid") == pid
+            and process_identity(pid) == identity)
+
+
+def stop_expired(attempt):
+    """SIGTERM, then SIGKILL, to an expired reviewer's group, its identity checked again before each signal, so a
+    reused PID is never signalled. True once its leader is gone and no process is left in its group. The caller holds
+    only the dispatch lock: no short lock waits for a child's exit."""
+    pid, identity = attempt["child"]["pid"], attempt["child"]["identity"]
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if process_identity(pid) != identity:
             return False
@@ -1147,6 +1200,20 @@ def child_exited(attempt, now):
                 return False
             time.sleep(0.05)
     return False
+
+
+def reviewer_may_run(child):
+    """Whether the recorded reviewer, or a process left in its group, may still run. It never signals. A PID in use as
+    a process group ID is never given to a new process (Linux and macOS), so another process at the PID means the
+    reviewer's group has ended."""
+    pid, identity = child.get("pid"), child.get("identity") or {}
+    if type(pid) is not int or pid <= 1:
+        return False  # no child was recorded: only the user can say that no review runs
+    current = process_identity(pid)
+    if current.get("state") == "present":
+        recorded = identity.get("birth")
+        return recorded is None or current.get("birth") == recorded
+    return group_alive(pid) is not False
 
 
 def settle_attempt(state, attempt):
@@ -1168,6 +1235,13 @@ def settle_attempt(state, attempt):
     site_notes.write_review_state(state)
 
 
+def record_exit(attempt):
+    """Record the verified end of an attempt already settled: its status and counters stay as they were settled."""
+    attempt["child"] = {**(attempt.get("child") or {}), "exited": True}
+    attempt["finished_at"] = attempt.get("finished_at") or datetime.now().isoformat()
+    save_attempt(attempt)
+
+
 def settle_ended(state, attempt, committed):
     """Settle an attempt whose reviewer has ended: committed evidence makes it a success, else it was abandoned."""
     if attempt["attempt_id"] in committed:
@@ -1180,8 +1254,10 @@ def settle_ended(state, attempt, committed):
     settle_attempt(state, attempt)
 
 
-def recover_attempts(state):
-    """Under dispatch+review locks, settle abandoned work without redispatching it."""
+def recover_attempts(state, *, stop=None):
+    """Under dispatch+review locks, settle ended work without redispatching it. An expired reviewer that still runs
+    under its exact identity goes into stop, when given, for the caller to stop outside the reviews' lock; otherwise
+    it blocks dispatch, as any live or unknown child does."""
     recover_or_stop()
     committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
     attempts = [review_records.read(path, "attempt") for path in sorted((REVIEWS / "attempts").glob("*.json"))]
@@ -1196,10 +1272,15 @@ def recover_attempts(state):
         settled = attempt["attempt_id"] in state["accounted_attempt_ids"]
         if settled and (attempt.get("child") or {}).get("exited") is True:
             continue
-        if not child_exited(attempt, time.time()):
+        if child_exited(attempt) and settled:
+            record_exit(attempt)  # counted when it was settled
+        elif child_exited(attempt):
+            settle_ended(state, attempt, committed)
+        elif stop is not None and expired_owned(attempt, time.time()):
+            stop.append(attempt)
+        else:
             raise DispatchBlocked("An earlier reviewer is live or its child ownership is unknown; once no review "
                                   f"runs, settle it with: {RESOLVE_COMMAND} {attempt['attempt_id']}")
-        settle_ended(state, attempt, committed)
 
 
 def claim_attempt(state, kind, batch, now):
@@ -1234,11 +1315,12 @@ def preflight_lines(init, result, launch_failure, problems):
     ]
 
 
-def launch_attempt(attempt, batch):
-    """Only dispatch lock survives the model wait; short locks protect each transition."""
+def launch_attempt(attempt, batch, membership=()):
+    """Only dispatch lock survives the model wait; short locks protect each transition. membership: the batch's
+    membership_lines(), printed with the attempt's outcome, so deferred items show when a review runs too."""
     quote = str if batch is None else None
     spawn_attempted = False
-    diagnostics = []
+    diagnostics = list(membership)
 
     def transition(**changes):
         # Attempt files are written only by the dispatch lock's holder (claim, these transitions, settlement and
@@ -1287,6 +1369,8 @@ def launch_attempt(attempt, batch):
         attempt.update(status="failed" if failure else "succeeded", error=failure)
     except Superseded:
         attempt.update(status="superseded", error="Batch dependencies changed while the reviewer was running")
+    except ReplyConflict:
+        attempt.update(status="superseded", error="A different reply was committed for this batch meanwhile")
     except RecoveryPending as error:
         # Committed decisions make this a success once recovery publishes the digest; until then it stays open.
         attempt.update(status="returned" if error.committed_now else "uncertain",
@@ -1294,7 +1378,7 @@ def launch_attempt(attempt, batch):
                        "An earlier committed review is pending recovery")
     except Exception as error:
         # Recovery below can establish success if the receipt publication already committed.
-        attempt.update(status="uncertain", error=("the review crashed: " + clip(quote(str(error))) if quote else
+        attempt.update(status="uncertain", error=("the review crashed: " + clip_quoted(error, quote) if quote else
                                                    "The review stopped before its privacy context was verified"))
     with review_lock(wait=SHORT_LOCK_SECONDS):
         attempt["finished_at"] = datetime.now().isoformat()
@@ -1314,7 +1398,10 @@ def launch_attempt(attempt, batch):
             if committed.get("attempt_id") == attempt["attempt_id"]:
                 attempt.update(status="succeeded", error=None, cost=committed["cost"])
                 save_attempt(attempt)
-        if child_exited(attempt, time.time()):
+        if child_exited(attempt):
+            if (attempt.get("child") or {}).get("exited") is not True:  # the verified exit is recorded first
+                attempt["child"] = {**attempt["child"], "exited": True}
+                save_attempt(attempt)
             settle_attempt(state, attempt)
         else:
             raise DispatchBlocked("Reviewer child exit is not verified; no new paid launch is allowed")
@@ -1351,8 +1438,14 @@ def paid_command(kind, since=None):
         return 0 if kind == "auto" else 1
     try:
         with lock:
+            expired = []
             with review_lock(wait=SHORT_LOCK_SECONDS):
                 # Unreadable exclusions cannot change state, even through abandoned settlement.
+                site_notes.read_exclude(site_notes.EXCLUDE_PATH)
+                recover_attempts(read_state(), stop=expired)
+            for attempt in expired:  # no short lock is held while an expired reviewer is stopped
+                stop_expired(attempt)
+            with review_lock(wait=SHORT_LOCK_SECONDS):
                 site_notes.read_exclude(site_notes.EXCLUDE_PATH)
                 state = read_state()
                 recover_attempts(state)
@@ -1360,7 +1453,9 @@ def paid_command(kind, since=None):
                 if kind == "auto" and not site_notes.review_due(state, now):
                     print("auto: automatic reviews are off or the next review is not due")
                     return 0
-                batch = None if kind == "preflight" else _prepare_batch(day(AUTO_FROM) if kind == "auto" else since)
+                membership = []
+                batch = None if kind == "preflight" else _prepare_batch(day(AUTO_FROM) if kind == "auto" else since,
+                                                                        membership)
                 if batch:
                     deferred = (item["id"] for item in batch["deferred"] if item["kind"] == "runs")
                     queue = {"runs": {*batch["runs"], *deferred}}
@@ -1370,11 +1465,11 @@ def paid_command(kind, since=None):
                         state.update(last_start=started, next_due=int(now + REVIEW_EVERY_HOURS * 3600), running=None)
                         site_notes.write_review_state(state)
                         print(f"{started}: nothing eligible for a paid review")
-                        for line in membership_lines(batch):
+                        for line in membership:
                             print(line)
                         return 0
                 attempt = claim_attempt(state, kind, batch, now)
-            return launch_attempt(attempt, batch)
+            return launch_attempt(attempt, batch, membership)
     except ReviewBusy:
         print(BUSY)
         return 0 if kind == "auto" else 1
@@ -1422,6 +1517,12 @@ def apply_command(batch_id):
     except store_io.PublicationUncertain:
         print("Publication is uncertain; recover the pending receipt before retrying. "
               "Decisions may already be committed.")
+        return 1
+    except ReviewBusy:
+        print(BUSY)
+        return 1
+    except ReplyConflict:
+        print("A different reply is already committed for this batch; nothing was applied.")
         return 1
     except (OSError, ValueError):
         # Raw parser/provider/filesystem exceptions can quote untrusted values.
@@ -1511,10 +1612,51 @@ def set_state_command(note_id, state):
     return 0
 
 
+def resolve_step(attempt_id, confirmed):
+    """One pass of resolve, under the reviews' lock: (exit code, message) when done, or (None, question) when only
+    the user can say that no review runs. A pending receipt is published first, so committed evidence still proves
+    success. It never signals, and never settles while the recorded reviewer or a process in its group may run."""
+    recover_or_stop()
+    state = read_state()
+    path = attempt_path(attempt_id)
+    attempt = review_records.read(path, "attempt") if path.exists() else None
+    if attempt is None and state.get("running") != attempt_id:
+        return 1, f"No attempt {attempt_id}; nothing resolved."
+    child = (attempt or {}).get("child") or {}
+    settled = attempt_id in state["accounted_attempt_ids"]
+    if settled and child.get("exited") is True:
+        return 0, f"{attempt_id} is already settled; nothing resolved."
+    committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
+    if attempt and child_exited(attempt):
+        if settled:  # counted when it was settled: only its exit is recorded now
+            record_exit(attempt)
+            return 0, f"Recorded the exit of {attempt_id}'s reviewer; it was already settled."
+        settle_ended(state, attempt, committed)
+        return 0, f"Resolved {attempt_id}: its reviewer has ended; {attempt['status']}."
+    if reviewer_may_run(child):
+        return 1, (f"The reviewer of {attempt_id}, or a process in its group, may still run; nothing resolved. "
+                   "The next review stops it at its deadline.")
+    if not confirmed:
+        return None, (f"No reviewer process of {attempt_id} can be verified. " + (
+            "Recording that it ended counts nothing again." if settled else
+            "Settling it counts one failed review and never repeats it."))
+    if attempt is None:  # running names an attempt whose record never reached the disk
+        count_failure(state)
+        state.update(running=None, accounted_attempt_ids=[*state["accounted_attempt_ids"], attempt_id])
+        site_notes.write_review_state(state)
+    elif settled:
+        record_exit(attempt)
+    else:
+        attempt["child"] = {**child, "exited": True}
+        settle_ended(state, attempt, committed)
+    return 0, f"Resolved {attempt_id}."
+
+
 def resolve_command(attempt_id):
     """Settle, once, an attempt whose reviewer cannot be verified: claimed or spawning with no recorded child, or a
-    child whose identity cannot be read. The user confirms at a terminal that no review runs, as approve does. A
-    reviewer verifiably alive is never settled here: the next review stops it at its deadline."""
+    child whose identity cannot be read; or record the exit of one already settled. The user confirms at a terminal
+    that no review runs, as approve does, while only the dispatch lock is held. A reviewer that may still run is never
+    settled here: the next review stops it at its deadline."""
     if not isinstance(attempt_id, str) or not review_records.ID.fullmatch(attempt_id):
         print("An attempt ID has 32 hexadecimal characters; nothing resolved.")
         return 1
@@ -1523,51 +1665,36 @@ def resolve_command(attempt_id):
         print(BUSY)
         return 1
     try:
-        with lock, review_lock():
-            state = read_state()
-            path = attempt_path(attempt_id)
-            attempt = review_records.read(path, "attempt") if path.exists() else None
-            if attempt is None and state.get("running") != attempt_id:
-                print(f"No attempt {attempt_id}; nothing resolved.")
-                return 1
-            if attempt and attempt_id in state["accounted_attempt_ids"]:
-                print(f"{attempt_id} is already settled; nothing resolved.")
-                return 0
-            committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
-            if attempt and child_exited(attempt, time.time()):
-                settle_ended(state, attempt, committed)
-                print(f"Resolved {attempt_id}: its reviewer has ended; {attempt['status']}.")
-                return 0
-            child = (attempt or {}).get("child") or {}
-            identity = child.get("identity") or {}
-            if identity.get("state") == "present" and process_identity(child["pid"]) == identity:
-                print(f"The reviewer of {attempt_id} is still running; the next review stops it at its deadline.")
-                return 1
-            print(f"No reviewer process of {attempt_id} can be verified. Settling it counts one failed review and "
-                  "never repeats it.")
-            try:
-                terminal = open_terminal()
-            except OSError as error:
-                print(f"resolve reads its confirmation from a terminal, and there is none here ({error}); "
-                      "nothing resolved.")
-                return 1
-            with terminal:
-                print("Type yes once no claude review runs: ", end="", flush=True)
-                answer = terminal.readline().strip().lower()
-            if answer != "yes":
-                print("Not resolved.")
-                return 1
-            if attempt is None:  # running names an attempt whose record never reached the disk
-                count_failure(state)
-                state.update(running=None, accounted_attempt_ids=[*state["accounted_attempt_ids"], attempt_id])
-                site_notes.write_review_state(state)
-            else:
-                attempt.update(child={"exited": True})
-                settle_ended(state, attempt, committed)
-            print(f"Resolved {attempt_id}.")
-            return 0
+        with lock:
+            with review_lock():
+                code, message = resolve_step(attempt_id, confirmed=False)
+            if code is None:
+                print(message)
+                try:
+                    terminal = open_terminal()
+                except OSError as error:
+                    print(f"resolve reads its confirmation from a terminal, and there is none here ({error}); "
+                          "nothing resolved.")
+                    return 1
+                with terminal:
+                    print("Type yes once no claude review runs: ", end="", flush=True)
+                    answer = terminal.readline().strip().lower()
+                if answer != "yes":
+                    print("Not resolved.")
+                    return 1
+                with review_lock():  # everything is read and checked again
+                    code, message = resolve_step(attempt_id, confirmed=True)
+            print(message)
+            return code
     except ReviewBusy:
         print(BUSY)
+        return 1
+    except RecoveryPending:
+        print(f"A committed review's digest is pending recovery; run: {RECOVER_COMMAND}, then resolve again.")
+        return 1
+    except (OSError, ValueError):  # an unreadable state or attempt record; its text could quote a file
+        print("Nothing resolved: the review state or an attempt record cannot be read or saved; "
+              "inspect artifacts/reviews.")
         return 1
 
 
@@ -1578,9 +1705,14 @@ def enable_command():
         print(BUSY)
         return 1
     with lock:
-        state = read_state()
-        state.update(failures=0, off=False)
-        site_notes.write_review_state(state)
+        try:
+            state = read_state()
+            state.update(failures=0, off=False)
+            site_notes.write_review_state(state)
+        except (OSError, ValueError):  # an unreadable or unsupported state; its text could quote the file
+            print("Automatic reviews were not turned on: the review state cannot be read or saved; "
+                  "inspect artifacts/reviews.")
+            return 1
     print("Automatic reviews are on again.")
     return 0
 
@@ -1612,8 +1744,9 @@ def main(argv=None):
     commands.add_parser("preflight", help="check the review's login, schema and start, for at most $0.05")
     args = parser.parse_args(argv)
     if args.command == "queue":
+        membership = []
         try:
-            batch = prepare_batch(args.since)
+            batch = prepare_batch(args.since, membership)
         except RecoveryPending:
             print("A committed review's digest is not yet published; nothing was queued. "
                   f"Run: {RECOVER_COMMAND}", file=sys.stderr)
@@ -1627,7 +1760,7 @@ def main(argv=None):
         text = batch["sent_text"]
         print(text, end="")
         print(f"batch: {batch['batch_id']}", file=sys.stderr)
-        for line in membership_lines(batch):
+        for line in membership:
             print(line, file=sys.stderr)
         if not text:
             print("Nothing fits a batch; the deferred items need a manual look." if batch["deferred"]

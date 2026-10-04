@@ -113,9 +113,10 @@ def run_versions(runs, reasons, recoveries):
 
 
 def valid_time(value):
+    """An ISO time that timestamp() can read: a stored time every reader sorts by."""
     try:
-        return isinstance(value, str) and bool(datetime.fromisoformat(value))
-    except ValueError:
+        return isinstance(value, str) and math.isfinite(timestamp(value))
+    except (ValueError, OverflowError, OSError):  # year 1 read as local time falls before year 1
         return False
 
 
@@ -151,6 +152,10 @@ def item_maps(items):
             raise RecordError("Duplicate or invalid input item")
         mappings[kind][key] = item["version"]
     return mappings
+
+
+# Why a prepared batch left an item for a later one; batch records and every report use these words.
+DEFERRED_REASONS = {"item_cap": "over the batch's item limit", "byte_cap": "over the batch's byte limit"}
 
 
 def text_fields(value, names):

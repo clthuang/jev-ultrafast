@@ -352,6 +352,17 @@ def note_url(chain):
     return strip_query(url) if url and url_refusal(url, run_site(run)) is None else None
 
 
+VALUE_REFUSAL = "its detail or URL holds a value from the task"
+
+
+def url_holds(url, values):
+    """True when a note URL holds one of the values (a task_value_pattern()) outside its scheme and host: raw, as
+    /u/jane_doe holds a typed jane_doe, and decoded with underscores as spaces, as /u/Jane_Doe and /people/Mr%20Smith
+    hold a typed name."""
+    raw = SCHEME_AND_HOST.sub(r"\g<userinfo>", url or "")
+    return bool(values.search(raw) or values.search(unquote_plus(raw).replace("_", " ")))
+
+
 def check_note(note, chain, exclude):
     """The reasons code refuses to store a note, before any write (design §6.5); none when it may be stored.
 
@@ -370,11 +381,8 @@ def check_note(note, chain, exclude):
         reasons.append(f"its detail is over {DETAIL_CHARACTERS} characters")
     if URL_IN_TEXT.search(detail):
         reasons.append("its detail holds a URL")
-    # The URL raw, as /u/jane_doe holds a typed jane_doe, and decoded with underscores as spaces, as /u/Jane_Doe and
-    # /people/Mr%20Smith hold a typed name.
-    raw = SCHEME_AND_HOST.sub(r"\g<userinfo>", note["url"] or "")
-    if values.search(detail) or values.search(raw) or values.search(unquote_plus(raw).replace("_", " ")):
-        reasons.append("its detail or URL holds a value from the task")
+    if values.search(detail) or url_holds(note["url"], values):
+        reasons.append(VALUE_REFUSAL)
     if any(excluded(run_id, chain[run_id], exclude) for run_id in chain):
         reasons.append("its site or one of its runs is excluded")
     call_url = (run.get("call") or {}).get("url")

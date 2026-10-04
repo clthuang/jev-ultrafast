@@ -406,7 +406,7 @@ def review_lines(reviews, kept, exclude, left_out):
             acknowledged = [f"{kind[:-1]} {key}@{version[:8]}" for kind in ("runs", "notes")
                             for key, version in digest["acknowledged"][kind].items()]
             block += [f"{path}:", f"  input: {members(sent)}", f"  acknowledged: {members(acknowledged)}",
-                      *(shown(items) or ["  no decisions to show"])]
+                      *deferred_lines(reviews, digest["batch_id"]), *(shown(items) or ["  no decisions to show"])]
         latest = path, proposals, flags
     if latest:
         # Delegated decision P19 (docs/failure-review-plan.md): open proposals and label flags are the latest
@@ -425,6 +425,24 @@ def review_lines(reviews, kept, exclude, left_out):
     if hidden:
         lines.append(f"review items and note details left out for exclusions: {hidden}")
     return lines + marked(block)
+
+
+def deferred_lines(reviews, batch_id):
+    """How many items a reviewed batch left queued for a later one, by kind and reason, from its batch record. Never
+    their IDs: the batch named only its own items, and a deferred note's ID can hold a value someone typed."""
+    path = reviews / "batches" / f"{batch_id}.json"
+    if not path.exists():  # a digest without its batch record shows its members only
+        return []
+    try:
+        batch = review_records.read(path, "batch")
+    except (OSError, ValueError):
+        return ["  deferred: unknown; the batch record cannot be read"]
+    counts = Counter((item["kind"][:-1], item["reason"]) for item in batch["deferred"])
+    if not counts:
+        return []
+    return ["  deferred, still queued: " + ", ".join(
+        f"{number} {kind}{'' if number == 1 else 's'} {review_records.DEFERRED_REASONS[reason]}"
+        for (kind, reason), number in sorted(counts.items()))]
 
 
 def marked(lines):
@@ -479,7 +497,8 @@ def main(argv=None):
             rows.append(facts(run))
             runs[path.stem] = run
         except Exception as error:  # one unreadable or foreign file must not hide the other runs
-            print(f"skipped {path.name}: {error!r}", file=sys.stderr)
+            # Its type only: a message, as a UnicodeDecodeError's, can quote the file, and an excluded run's with it.
+            print(f"skipped {path.name}: {type(error).__name__}", file=sys.stderr)
     if rows:
         groups = {}
         for row in rows:

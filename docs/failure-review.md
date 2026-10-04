@@ -456,12 +456,18 @@ request with code's checks added, and it sends less than today's version, which 
 **Batches (2026-10-04, robustness plan REVIEWS-1…7).** `queue` saves an immutable batch: at most 25 runs, 5 notes and
 65,536 bytes, oldest whole items first. It prints each item sent and each item deferred, with its reason, so a backlog
 drains over several batches and an item too large for any batch is shown for a manual look instead of silently
-waiting. Only a committed batch acknowledges exactly the item versions it sent; a later correction queues the run
-again. Automatic reviews still consider only runs from `BUILD_DATE` on (`AUTO_FROM`), and their cadence, $0.50 cap,
-15-minute limit and three-failure rule are unchanged. If a committed review's digest cannot be published, its receipt
-in the notes file keeps the decisions and new work waits: `review_runs.py recover` publishes it. If a paid review's
-process cannot be verified, dispatch stops rather than risk a second paid run; once no review runs,
-`review_runs.py resolve <attempt ID>`, confirmed at a terminal, settles it once.
+waiting; automatic and paid reviews print the same lines, and the report counts each committed batch's deferred
+items. A deferred ID passes the batch's privacy check like the text it sends: a note on a site someone typed shows
+`<value>` in its place. Only a committed batch acknowledges exactly the item versions it sent; a later correction
+queues the run again. Automatic reviews still consider only runs from `BUILD_DATE` on (`AUTO_FROM`), and their
+cadence, $0.50 cap, 15-minute limit and three-failure rule are unchanged. If a committed review's digest cannot be
+published, its receipt in the notes file keeps the decisions and new work waits: `review_runs.py recover` publishes it,
+and `apply` says when a reply's own decisions are the ones committed. If a paid review's process cannot be verified,
+dispatch stops rather than risk a second paid run; `review_runs.py resolve <attempt ID>` publishes any pending
+receipt first, never signals a process, refuses while the reviewer or any process left in its group may run, and
+otherwise settles the attempt once after you confirm at a terminal that no review runs (for an attempt already
+settled, it only records that its reviewer ended). A start_at_url lesson from a review is checked as the server
+checks one, over its whole chain with excluded runs, and its URL against every value the batch redacts.
 
 ### 7.4 Automatic (on)
 

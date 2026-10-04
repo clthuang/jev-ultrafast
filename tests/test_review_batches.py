@@ -977,28 +977,40 @@ def test_export_preserves_new_notes_outcomes_receipts_and_ack_history(tmp_path, 
 
 PRIVATE_PREDECESSOR, FIRST_TRY, RECOVERED, UNRELATED = (
     '20261003-090000-0001', '20261003-090100-0002', '20261003-090200-0003', '20261003-100000-0004')
+OTHER_FAILED, OTHER_RECOVERED = '20261003-090300-0005', '20261003-090400-0006'
 
 
 def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fake_paid):
     """Canaries typed by a selected run, a deferred run and an excluded predecessor never reach any output or file:
-    the queue and apply CLI, refusals beside a valid decision, a receipt, recovery, every paid failure message
-    (provider error, start failure, did not start, crash), attempts, state and the report."""
+    the queue and apply CLI with their membership lines, a deferred note whose ID holds one, a start_at_url URL a
+    recovery started at, refusals beside a valid decision, a receipt, recovery, every paid failure message (provider
+    error, tools, MCP servers, did not start, crash), the automatic path with nothing eligible, attempts, state and the
+    report."""
     from scripts.migrate_review_storage import migrate_storage
 
     selected, deferred, excluded = 'Selectedcanary', 'Deferredcanary', 'Excludedcanary'
     canaries = (selected, deferred, excluded)
+    seeded_site = f'{deferred.lower()}.example'  # a stored note keyed by a site someone typed
     site_notes.NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     site_notes.NOTES_PATH.write_text(json.dumps(site_notes.SEEDS))  # a legacy store, migrated first
     migrate_storage(site_notes.NOTES_PATH.parent)
+    site_notes.add_note({'site': seeded_site, 'hint': 'scroll_first', 'detail': None, 'url': None, 'failure': None,
+                         'runs': {'failed': [], 'recovered': None}})
     write_run(PRIVATE_PREDECESSOR, goal=f'{excluded} search', history=[{'text': excluded}])
     write_run(FIRST_TRY, previous_run=PRIVATE_PREDECESSOR, goal=f'{selected} {deferred} {excluded}',
               history=[{'text': selected}])
+    # The recovery started at a URL holding what only the excluded predecessor typed.
     write_run(RECOVERED, previous_run=FIRST_TRY, goal=f'{selected} again', history=[{'text': selected}],
-              result={'status': 'done', 'notes': []},
+              call={'url': f'https://example.com/u/{excluded}'}, result={'status': 'done', 'notes': []},
+              outcome=[{'passed': True, 'by': 'user', 'evidence': 'Verified', 'at': '2026-10-03T11:00:00'}])
+    other = {'url': 'https://example.org/', 'title': 'Other'}
+    write_run(OTHER_FAILED, page=other, history=[{'text': selected}])
+    write_run(OTHER_RECOVERED, page=other, previous_run=OTHER_FAILED, result={'status': 'done', 'notes': []},
               outcome=[{'passed': True, 'by': 'user', 'evidence': 'Verified', 'at': '2026-10-03T11:00:00'}])
     write_run(UNRELATED, history=[{'text': deferred}])
     site_notes.EXCLUDE_PATH.write_text(PRIVATE_PREDECESSOR)
-    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 2)
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 4)
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_NOTES', 0)  # every note waits, the seeded one included
     outputs = []
 
     def drain():
@@ -1007,16 +1019,19 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
         return outputs[-1]
 
     assert review_runs.main(['queue']) == 0
-    batch = review_runs.load_batch(batch_id_of(drain()))
-    assert set(batch['runs']) == {FIRST_TRY, RECOVERED}
+    queued = drain()
+    batch = review_runs.load_batch(batch_id_of(queued))
+    assert set(batch['runs']) == {FIRST_TRY, RECOVERED, OTHER_FAILED, OTHER_RECOVERED}
     assert {'kind': 'runs', 'id': UNRELATED, 'reason': 'item_cap'} in batch['deferred']
+    assert f'deferred: note <value>.example-1 ({review_runs.DEFERRED_REASONS["item_cap"]})' in queued
     # A schema refusal whose key is a canary is refused without quoting it.
     monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({**EMPTY_REPLY, deferred: 'unexpected'})))
     assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
     assert 'unknown key <value>' in drain()
-    # A semantic refusal beside a valid decision; the digest then fails once, so the receipt keeps both.
+    # Two refusals beside a valid decision; the digest then fails once, so the receipt keeps all three.
     reply = {**EMPTY_REPLY, 'summary': ' '.join(canaries), 'decisions': [
-        add_decision(RECOVERED, detail=f'Type {selected} first.'), add_decision(RECOVERED)]}
+        add_decision(RECOVERED, hint='start_at_url', detail=''),
+        add_decision(OTHER_RECOVERED, detail=f'Type {selected} first.'), add_decision(OTHER_RECOVERED)]}
     real_publish, fired = review_runs.store_io.publish, []
 
     def fail_digest_once(target, value, **options):
@@ -1034,7 +1049,9 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
     assert review_runs.main(['recover']) == 0
     drain()
     digest = review_records.read(review_runs.committed_path(batch['batch_id']), 'digest')
-    assert [decision['applied'] for decision in digest['decisions']] == [False, True]
+    assert [decision['applied'] for decision in digest['decisions']] == [False, False, True]
+    assert site_notes.VALUE_REFUSAL in digest['decisions'][0]['outcome']
+    assert not [note for note in site_notes.load()[0] if note['runs'].get('recovered') == RECOVERED]
     # Each paid failure path, its message built from canaries; a correction requeues the first try each time.
     fake = review_runs.launch
 
@@ -1043,19 +1060,23 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
         result.update(subtype=selected, result=f'{deferred} {excluded}')
         return init, result, None
 
-    def start_failure(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
-        fake_paid.append((text, budget))
-        process = SimpleNamespace(pid=12345)
-        before_spawn()
-        on_spawn(process)
-        on_exit(process)
-        init = {'type': 'system', 'subtype': 'init', 'tools': [selected], 'mcp_servers': [deferred]}
-        return init, None, review_runs.start_failure(init, quote)
+    def start_failure_with(tools, servers):
+        def start_failure(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
+            fake_paid.append((text, budget))
+            process = SimpleNamespace(pid=12345)
+            before_spawn()
+            on_spawn(process)
+            on_exit(process)
+            init = {'type': 'system', 'subtype': 'init', 'tools': tools, 'mcp_servers': servers}
+            return init, None, review_runs.start_failure(init, quote)
+        return start_failure
 
     def crash(*args, **kwargs):
         raise RuntimeError(f'{excluded} crashed the review')
 
-    paths = [('provider', provider_error), ('start', start_failure), ('crash', crash)]
+    paths = [('provider', provider_error), ('tools', start_failure_with([selected], [])),
+             ('servers', start_failure_with([review_runs.STRUCTURED_OUTPUT_TOOL], [{'name': deferred}])),
+             ('crash', crash)]
     for number, (name, launcher) in enumerate(paths, 1):
         path = review_runs.RUNS / f'{FIRST_TRY}.json'
         value = json.loads(path.read_text())
@@ -1075,19 +1096,31 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
     path.write_text(json.dumps(value))
     assert review_runs.once_command(None) == 1
     drain()
-    lines = report_runs.review_lines(review_runs.REVIEWS, site_notes.load()[0], {PRIVATE_PREDECESSOR},
-                                     {PRIVATE_PREDECESSOR})
-    drain()
+    # The automatic path, turned on again a day later: too little waits, so it lists the batch it would send and
+    # what it defers.
+    assert review_runs.main(['enable']) == 0
+    site_notes.write_review_state({**review_runs.read_state(), 'next_due': 0})
+    assert review_runs.auto_command() == 0
+    automatic = drain()
+    assert 'nothing eligible for a paid review' in automatic and 'deferred: note <value>.example-1' in automatic
+    report_runs.main(['--runs', str(review_runs.RUNS), '--artifacts', str(review_runs.RUNS.parent)])
+    report = capsys.readouterr()
+    assert 'deferred, still queued:' in report.out
+    assert f'1 run {review_runs.DEFERRED_REASONS["item_cap"]}' in report.out
     published = [site_notes.NOTES_PATH, site_notes.REVIEW_STATE, *review_runs.REVIEWS.rglob('*.json')]
-    everything = receipt_text + ''.join(outputs) + '\n'.join(lines) + ''.join(
-        path.read_text() for path in published if path.exists())
+    files = ''.join(path.read_text() for path in published if path.exists())
+    # The seeded note is the test's own input: the store and the report's note listing hold its site by design.
+    stored = re.sub(re.escape(seeded_site), '<site>', receipt_text + files + report.out + report.err, flags=re.I)
+    everything = ''.join(outputs) + stored  # every CLI and paid-path output, unmasked
     assert not any(canary.lower() in everything.lower() for canary in canaries)
     for wording in ('the review ended with <value>: <value> <value>', 'the session has tools beyond StructuredOutput',
-                    'the review crashed: <value>', 'claude did not start: <value>', 'its detail holds a value from'):
+                    "the session has MCP servers: [{'name': '<value>'}]", 'the review crashed: <value>',
+                    'claude did not start: <value>', 'its detail holds a value from'):
         assert wording in everything, wording
 
 
 import io  # noqa: E402
+import re  # noqa: E402
 import sys  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -1140,16 +1173,22 @@ def test_resolve_settles_an_unverifiable_attempt_only_after_terminal_confirmatio
     assert review_runs.once_command(None) == 0 and len(fake_paid) == 1  # the next dispatch is no longer blocked
 
 
-def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch, capsys):
+@pytest.mark.parametrize('liveness', ['leader alive', 'leader gone, group alive', 'group unknown'])
+@pytest.mark.parametrize('deadline', ['ahead', 'passed'])
+def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch, capsys, liveness, deadline):
     claim = unverifiable_attempt()
     identity = review_runs.process_identity(12345)  # the fake reports this child alive with this identity
     claim.update(status='running', child={'pid': 12345, 'identity': identity, 'exited': False})
+    if deadline == 'passed':  # even an expired reviewer is only stopped by the next review, never by resolve
+        claim['deadline'] = time.time() - 60
     review_runs.save_attempt(claim)
+    if liveness != 'leader alive':
+        monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None if liveness == 'group unknown' else True)
     monkeypatch.setattr(review_runs, 'open_terminal', lambda: pytest.fail('a live reviewer needs no confirmation'))
     monkeypatch.setattr(review_runs.os, 'killpg', lambda *args: pytest.fail('resolve never signals'))
-    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: True)
     assert review_runs.main(['resolve', claim['attempt_id']]) == 1
-    assert 'still running' in capsys.readouterr().out
+    assert 'may still run; nothing resolved' in capsys.readouterr().out
     assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
 
 
@@ -1190,8 +1229,13 @@ def test_failure_after_commit_reports_recovery_pending_never_not_applied(fake_pa
         monkeypatch.setattr(review_runs.store_io, 'publish', real)
         path.write_text('{"broken": ' if fault == 'malformed digest' else
                         json.dumps({**receipt['digest'], 'summary': 'A different reply'}))
-    # Until recovery succeeds, neither another apply nor a paid review runs.
+    # Until recovery succeeds, neither another apply nor a paid review runs. The same reply is told it is committed;
+    # any other reply, that nothing of it was applied.
     monkeypatch.setattr(sys, 'stdin', io.StringIO(reply))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    out = capsys.readouterr().out
+    assert "The reply's decisions are committed" in out and 'nothing was applied' not in out
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(EMPTY_REPLY)))
     assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
     assert 'nothing was applied' in capsys.readouterr().out
     write_run(RUN_C)
@@ -1395,3 +1439,329 @@ def test_three_failed_reviews_in_a_row_turn_automatic_reviews_off(fake_paid, mon
     assert review_runs.auto_command() == 0
     assert len(fake_paid) == review_runs.REVIEW_MAX_FAILURES + 1  # automatic reviews run again after enable
     assert review_runs.read_state()['failures'] == 0
+
+
+@pytest.mark.parametrize('boundary', ['after the replace', 'directory fsync'])
+def test_uncertain_notes_publication_is_reported_through_the_cli(fake_paid, monkeypatch, capsys, boundary):
+    """The notes replace happens, then publication fails: apply says the decisions may be committed, never that the
+    reply could not be applied, and recovery then settles them once."""
+    recovery()
+    batch = review_runs.prepare_batch()
+    original, fsync, fired = store_io.publish, store_io.fsync_directory, []
+
+    def publish(path, value, **options):
+        result = original(path, value, **options)
+        if (boundary == 'after the replace' and not fired and Path(path).name == site_notes.NOTES_PATH.name
+                and value.get('pending_review')):
+            fired.append(path)
+            raise store_io.PublicationUncertain('injected after the replace')
+        return result
+
+    def sync(directory):
+        if boundary == 'directory fsync' and not fired and Path(directory).name == site_notes.NOTES_PATH.parent.name:
+            fired.append(directory)
+            raise OSError('injected directory fsync')
+        return fsync(directory)
+
+    monkeypatch.setattr(store_io, 'publish', publish)
+    monkeypatch.setattr(store_io, 'fsync_directory', sync)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({**EMPTY_REPLY, 'decisions': [add_decision()]})))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    out = capsys.readouterr().out
+    assert fired and 'Publication is uncertain' in out and 'Decisions may already be committed' in out
+    assert 'could not be applied' not in out and pending_receipt()['batch_id'] == batch['batch_id']
+    monkeypatch.setattr(store_io, 'publish', original)
+    monkeypatch.setattr(store_io, 'fsync_directory', fsync)
+    assert review_runs.main(['recover']) == 0
+    assert sum(note['runs'].get('recovered') == RUN_B for note in site_notes.load()[0]) == 1
+
+
+def test_an_unreadable_notes_file_after_the_commit_reports_recovery_pending(fake_paid, monkeypatch, capsys):
+    """Notes and receipt are committed; reading the notes again then fails: committed, pending recovery."""
+    recovery()
+    batch = review_runs.prepare_batch()
+    real_read, commits = site_notes.read_envelope, []
+    real_publish = store_io.publish
+
+    def publish(path, value, **options):
+        if Path(path).name == site_notes.NOTES_PATH.name and value.get('pending_review'):
+            commits.append(path)
+        return real_publish(path, value, **options)
+
+    def read_envelope(path, *args, **kwargs):
+        if commits:
+            raise site_notes.NotesStoreError('injected EIO reading the notes file')
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_io, 'publish', publish)
+    monkeypatch.setattr(site_notes, 'read_envelope', read_envelope)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({**EMPTY_REPLY, 'decisions': [add_decision()]})))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    out = capsys.readouterr().out
+    assert commits and "The reply's decisions are committed" in out and 'could not be applied' not in out
+    monkeypatch.setattr(site_notes, 'read_envelope', real_read)
+    assert pending_receipt()['batch_id'] == batch['batch_id']
+    assert review_runs.main(['recover']) == 0
+
+
+def test_apply_reports_a_held_lock_and_a_conflicting_reply_as_such(fake_paid, monkeypatch, capsys):
+    recovery()
+    batch = review_runs.prepare_batch()
+    release, thread = hold_review_lock(10)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(EMPTY_REPLY)))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    assert review_runs.BUSY in capsys.readouterr().out
+    release.set()
+    thread.join(5)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(EMPTY_REPLY)))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 0
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({**EMPTY_REPLY, 'summary': 'Another reply'})))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    out = capsys.readouterr().out
+    assert 'A different reply is already committed for this batch' in out and 'recover' not in out
+
+
+@pytest.mark.parametrize('where', ['its own final section', 'a later recovery'])
+def test_committed_evidence_makes_an_unfinished_paid_attempt_a_success(fake_paid, monkeypatch, where):
+    write_run()
+    if where == 'its own final section':
+        real_apply = review_runs._apply_batch
+
+        def commit_then_crash(batch, reply, cost=None, attempt_id=None):
+            real_apply(batch, reply, cost, attempt_id)
+            raise RuntimeError('crashed after the commit point')
+
+        monkeypatch.setattr(review_runs, '_apply_batch', commit_then_crash)
+        assert review_runs.once_command(None) == 0
+    else:  # the process died after the commit, before its final section
+        batch = review_runs.prepare_batch()
+        claim = review_runs.claim_attempt(review_runs.read_state(), 'once', batch, time.time())
+        claim.update(status='returned', cost=0.0123, child={
+            'pid': 12345, 'identity': review_runs.process_identity(12345), 'exited': True})
+        review_runs.save_attempt(claim)
+        with review_runs.review_lock():
+            review_runs._apply_batch(batch, EMPTY_REPLY, 0.0123, claim['attempt_id'])
+            review_runs.recover_attempts(review_runs.read_state())
+    [attempt] = attempts()
+    state = review_runs.read_state()
+    assert attempt['status'] == 'succeeded' and attempt['cost'] == 0.0123
+    assert state.get('failures', 0) == 0 and state['accounted_attempt_ids'] == [attempt['attempt_id']]
+
+
+def test_settling_an_attempt_again_counts_it_once(fake_paid):
+    write_run()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    claim['status'] = 'abandoned'
+    with review_runs.review_lock():
+        for state in (review_runs.read_state(), review_runs.read_state()):
+            review_runs.settle_attempt(state, claim)
+            review_runs.settle_attempt(state, claim)
+    state = review_runs.read_state()
+    assert state['failures'] == 1 and state['accounted_attempt_ids'] == [claim['attempt_id']]
+
+
+def test_a_group_left_alive_by_its_leader_blocks_settlement_and_dispatch(fake_paid, monkeypatch, capsys):
+    """The leader exits, a process stays in its group: no exit is recorded, nothing settles, no review starts;
+    once the group is gone, the attempt settles once and its exit is recorded."""
+    write_run()
+    identity = review_runs.process_identity(12345)
+    leader, group = {'present': True}, {'alive': True}
+    monkeypatch.setattr(review_runs, 'process_identity',
+                        lambda pid: dict(identity) if leader['present'] else {'state': 'absent'})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: group['alive'])
+    fake = review_runs.launch
+
+    def leader_exits(*args, **kwargs):
+        result = fake(*args, **kwargs)
+        leader['present'] = False
+        return result
+
+    monkeypatch.setattr(review_runs, 'launch', leader_exits)
+    assert review_runs.once_command(None) == 1
+    assert 'exit is not verified' in capsys.readouterr().out
+    [attempt] = attempts()
+    assert attempt['child']['exited'] is False and review_runs.read_state()['accounted_attempt_ids'] == []
+    write_run(RUN_B)
+    assert review_runs.once_command(None) == 1 and len(fake_paid) == 1  # still blocked
+    group['alive'] = False
+    assert review_runs.once_command(None) == 0 and len(fake_paid) == 2
+    settled = next(item for item in attempts() if item['attempt_id'] == attempt['attempt_id'])
+    assert settled['child']['exited'] is True and settled['status'] == 'succeeded'
+    state = review_runs.read_state()
+    assert attempt['attempt_id'] in state['accounted_attempt_ids'] and state.get('failures', 0) == 0
+
+
+def test_an_exit_verified_after_on_exit_is_recorded_so_it_never_blocks_later(fake_paid, monkeypatch):
+    """on_exit still sees the group; the final section verifies its end: the attempt records the exit, so a reused
+    PID or a failing ps later blocks nothing."""
+    write_run()
+    group = {'alive': True}
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: group['alive'])
+    fake = review_runs.launch
+
+    def group_ends_after_on_exit(*args, **kwargs):
+        result = fake(*args, **kwargs)
+        group['alive'] = False
+        return result
+
+    monkeypatch.setattr(review_runs, 'launch', group_ends_after_on_exit)
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'} if not group['alive'] else {
+        'state': 'present', 'pid': pid, 'birth': '100:123', 'uid': os.getuid(), 'pgid': pid})
+    assert review_runs.once_command(None) == 0
+    [attempt] = attempts()
+    assert attempt['child']['exited'] is True and attempt['status'] == 'succeeded'
+    # Later its PID belongs to another process and ps fails: the recorded exit is enough, nothing blocks.
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {
+        'state': 'present', 'pid': pid, 'birth': '999:1', 'uid': os.getuid(), 'pgid': pid})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None)
+    with review_runs.review_lock():
+        review_runs.recover_attempts(review_runs.read_state())
+
+
+def test_resolve_records_the_exit_of_a_settled_attempt_without_counting_it_again(fake_paid, monkeypatch, capsys):
+    write_run()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    identity = review_runs.process_identity(12345)
+    claim.update(status='failed', child={'pid': 12345, 'identity': identity, 'exited': False})
+    review_runs.save_attempt(claim)
+    with review_runs.review_lock():
+        state = review_runs.read_state()
+        review_runs.settle_attempt(state, claim)  # settled, its exit never recorded
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {**identity, 'birth': '999:1'})  # reused
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None)  # and ps fails
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert f"{review_runs.RESOLVE_COMMAND} {claim['attempt_id']}" in capsys.readouterr().out
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: io.StringIO('yes\n'))
+    monkeypatch.setattr(review_runs.os, 'killpg', lambda *args: pytest.fail('resolve never signals'))
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 0
+    [resolved] = attempts()
+    assert resolved['status'] == 'failed' and resolved['child']['exited'] is True and resolved['child']['pid'] == 12345
+    assert review_runs.read_state()['failures'] == 1
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})  # the next child exits
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: False)
+    assert review_runs.once_command(None) == 0 and len(fake_paid) == 1  # no longer blocked
+
+
+def test_resolve_publishes_a_pending_receipt_first_so_committed_evidence_wins(fake_paid, monkeypatch, capsys):
+    recovery()
+    batch = review_runs.prepare_batch()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', batch, time.time())
+    claim['status'] = 'spawning'  # its child was never recorded
+    review_runs.save_attempt(claim)
+    real_publish, fired = store_io.publish, []
+
+    def fail_digest_once(target, value, **options):
+        if options.get('immutable') and Path(target).parent == review_runs.REVIEWS and not fired:
+            fired.append(target)
+            raise OSError('injected digest write failure')
+        return real_publish(target, value, **options)
+
+    monkeypatch.setattr(store_io, 'publish', fail_digest_once)
+    with review_runs.review_lock(), pytest.raises(review_runs.RecoveryPending):
+        review_runs._apply_batch(batch, EMPTY_REPLY, 0.0123, claim['attempt_id'])
+    assert pending_receipt()['batch_id'] == batch['batch_id']
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: pytest.fail('committed evidence needs no confirmation'))
+    claim['status'] = 'running'
+    claim['child'] = {'pid': 12345, 'identity': review_runs.process_identity(12345), 'exited': True}
+    review_runs.save_attempt(claim)
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 0
+    assert pending_receipt() is None
+    [resolved] = attempts()
+    assert resolved['status'] == 'succeeded' and review_runs.read_state().get('failures', 0) == 0
+
+
+def test_an_expired_reviewer_is_stopped_without_the_reviews_lock_and_never_after_its_pid_is_reused(
+        fake_paid, monkeypatch):
+    write_run()
+    started = time.time() - review_runs.REVIEW_TIMEOUT_MINUTES * 60 - 60
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), started)
+    identity = {'state': 'present', 'pid': 12345, 'birth': '100:123', 'uid': os.getuid(), 'pgid': 12345}
+    claim.update(status='running', child={'pid': 12345, 'identity': identity, 'exited': False})
+    review_runs.save_attempt(claim)
+    monkeypatch.setattr(review_runs, 'EXIT_SECONDS', 0.1)
+    signals, term = [], {}
+
+    def identity_now(pid):  # it ignores SIGTERM; its PID is reused just before SIGKILL would be sent
+        if 'at' in term and time.monotonic() - term['at'] >= review_runs.EXIT_SECONDS:
+            return {**identity, 'birth': '999:1'}
+        return dict(identity)
+
+    def killpg(pgid, sig):
+        signals.append(sig)
+        term.setdefault('at', time.monotonic())
+        assert review_runs.take_lock() is not None  # the reviews' lock is free while a child is stopped
+
+    monkeypatch.setattr(review_runs, 'process_identity', identity_now)
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: True)
+    monkeypatch.setattr(review_runs.os, 'killpg', killpg)
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert signals == [signal.SIGTERM]  # never a SIGKILL to the reused PID
+
+
+def test_a_clip_that_ends_a_longer_word_right_after_a_value_is_quoted_again():
+    """The value check runs before a cut too: x…x Selectedcanaryzz passes it, and its cut ends Selectedcanary…"""
+    quote = review_runs.privacy_quote({'values': {'selectedcanary'}, 'names': set(), 'run_ids': set()})
+    before = 'x' * (review_runs.LABEL_CHARACTERS - len('Selectedcanary') - 2) + ' '
+    text = before + 'Selectedcanaryzz and more'
+    assert quote(text) == text  # whole, the word is not the value
+    messages = [
+        review_runs.result_failure({'subtype': text, 'result': text}, quote),
+        *review_runs.schema_errors({text: 'x'}, review_runs.REVIEW_SCHEMA, quote=quote),
+        # Its servers print as a list, so ['x…x Selectedcanaryzz…'] is cut at TEXT_CHARACTERS.
+        review_runs.start_failure({'type': 'system', 'subtype': 'init', 'tools': [], 'mcp_servers': [
+            'x' * (review_runs.TEXT_CHARACTERS - len('Selectedcanary') - 4) + ' Selectedcanaryzz and more']}, quote),
+    ]
+    for message in messages:
+        assert 'canary' not in message.lower(), message
+    notes = [{'id': 'example.com-1', 'approved': None}]
+    with pytest.raises(review_runs.DecisionRefused) as refused:
+        review_runs.unapproved(notes, text)
+    assert 'canary' not in str(refused.value).lower()
+    with pytest.raises(review_runs.DecisionRefused, match='no note example.com-9$'):
+        review_runs.unapproved(notes, 'example.com-9')
+
+
+def test_a_stored_time_no_reader_can_convert_is_invalid(fake_paid, capsys):
+    for value in ('0001-01-01T00:00:00', 'not a time', None, 5):
+        assert not review_records.valid_time(value)
+    assert review_records.valid_time('2026-10-03T10:00:00') and review_records.valid_time('0001-01-01T00:00:00+00:00')
+    site_notes.write_review_state({'last_start': '0001-01-01T00:00:00', 'next_due': 0})
+    with pytest.raises(review_records.RecordError):
+        review_runs.read_state()
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert 'Traceback' not in capsys.readouterr().out
+
+
+def test_a_failed_exit_record_keeps_the_reply_and_its_cost(monkeypatch):
+    """The real launch() with a fake child: a failure to record its exit never replaces the result it returned."""
+    class Child:
+        pid = 4321
+
+        def __init__(self, *args, **kwargs):
+            init = {'type': 'system', 'subtype': 'init', 'tools': [review_runs.STRUCTURED_OUTPUT_TOOL],
+                    'mcp_servers': []}
+            result = {'type': 'result', 'subtype': 'success', 'structured_output': EMPTY_REPLY,
+                      'total_cost_usd': 0.0456}
+            self.stdout = io.StringIO(json.dumps(init) + '\n' + json.dumps(result) + '\n')
+
+        def wait(self, timeout=None):
+            return 0
+
+    def on_exit(process):
+        raise OSError('disk full while recording the exit')
+
+    monkeypatch.setattr(review_runs.shutil, 'which', lambda name: '/usr/local/bin/claude')
+    monkeypatch.setattr(review_runs.subprocess, 'Popen', Child)
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {
+        'state': 'present', 'pid': pid, 'birth': '100:123', 'uid': os.getuid(), 'pgid': pid})
+    init, result, failure = REAL_LAUNCH('text', 0.5, on_exit=on_exit)
+    assert failure is None and result['total_cost_usd'] == 0.0456 and init['subtype'] == 'init'
+
+
+@pytest.mark.parametrize('running', [5, ['x'], {'attempt': 'x'}])
+def test_a_running_value_that_is_neither_an_attempt_nor_a_time_stops_dispatch_clearly(fake_paid, capsys, running):
+    site_notes.write_review_state({'running': running, 'next_due': 0})
+    with pytest.raises(review_records.RecordError):
+        review_runs.read_state()
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert 'resolve' not in capsys.readouterr().out  # no attempt ID that resolve could never match

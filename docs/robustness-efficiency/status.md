@@ -106,6 +106,21 @@ digests, legacy state, retired notes); `test_mixed_legacy_and_v2_reporting` (mem
 commit — execution/storage (locks, crash points, dispatch, migration) and reporting/privacy (every output sink) — with
 all blockers and should-fix findings resolved. The compatible rollback export is RELEASE-3's.
 
+**Gate review, round 1 (frozen at `f1d7ffc`): both HOLD.** Each finding was reproduced by the reviewer; each fix has a
+test that fails on the reviewer's mutant (18 mutants of the should-fix items and 6 of the nits, all caught).
+
+| ID | Finding (reviewer, severity) | Resolution |
+| --- | --- | --- |
+| R9 | A start_at_url note's code-derived URL was checked only against the chain without excluded runs, so a value only an excluded predecessor typed was stored and later shown (privacy, blocker) | The note is checked as the server checks a lesson, over its whole chain with excluded runs, and its URL against every value of the batch's privacy closure (which links across sites too) |
+| R10 | Deferred IDs printed raw on `queue` stderr and in `auto.log` (privacy, should-fix) | Every membership line passes the selected batch's privacy quote: a deferred note on a typed site shows `<value>` |
+| R11 | Deferred items invisible when a paid review launches (privacy, should-fix) | Paid paths print the membership lines with the attempt; the report counts each committed batch's deferred items by kind and reason, never their IDs |
+| R12 | The real-pipeline test missed sinks: the MCP-server slot, a deferred canary ID, a start_at_url URL, the automatic "nothing eligible" path, `report_runs.main` (privacy, should-fix) | All five added to `test_real_pipeline_redacts_every_publication_surface` |
+| R13 | A notes-store read error after the commit point reached "could not be applied" (execution, should-fix) | Any failure after the commit point is `RecoveryPending(True)`; a re-applied reply whose own receipt is pending is told its decisions are committed |
+| R14 | `resolve` could signal an expired reviewer, settle while the leader's group lived, and ignore a pending receipt (execution, should-fix) | `resolve` publishes a pending receipt first, never signals, refuses while the identity matches or the group may live, and reads the terminal confirmation holding only the dispatch lock, re-checking everything after it |
+| R15 | A settled attempt whose verified exit was never saved blocked dispatch for good (execution, should-fix) | The final section saves the verified exit before settlement; `resolve` records the exit of a settled attempt without counting it again |
+| R16 | Pass lines without a pinning test (execution, should-fix) | Tests for the uncertain notes publication through the CLI, committed evidence in the final section and in later recovery, the accounted-ID guard, a group outliving its leader, and the identity check before each signal |
+| R17 | Nits: exit-record failure lost the reply and cost; `apply` hid BUSY and a conflicting reply; short locks held while stopping a child; `running` untyped; report printed an exception's repr; clipping could make a value whole; year-1 times crashed readers | Fixed, each with a test: `on_exit` failures are contained; distinct `apply` messages; an expired reviewer is stopped holding only the dispatch lock; `running` and `last_start` validated; exception type only; quote–clip–quote; `valid_time` uses `timestamp()` |
+
 ### 4.2 SNAPSHOT: schema-2 snapshots
 
 Measured on the current code with a synthetic page (one form, 6,000-character shared context): one observation of
