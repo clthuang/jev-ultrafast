@@ -155,9 +155,51 @@ native SELECT test, and record bytes, guard builds, scope reads and references f
 every observe advances the generation, so a decision becomes stale after any re-observe (READINESS must use non-installing
 reads); a real page with very long labels can now stop with `snapshot_too_large` instead of transferring megabytes.
 
-### 4.3 READINESS
+### 4.3 READINESS: page readiness on an owned event source
 
-Design in preparation from the current code; recorded here before implementation starts.
+Implements `docs/executor-improvements.md` §4 v4.2 (wait for loading before a final answer) and §2 v2 (repeat a read
+that times out after a step) against the current interfaces, not the historical diff (its `wait_for_loading(stop=…)`
+skips the 90 s deadline and its signatures predate POLICY/LIMITS).
+
+**Owned event source.** Browser Harness 0.1.13 keeps one 500-event queue per daemon, and `drain_events` empties it for
+every client, so the gate never uses the daemon's events and never sends `Network.enable` through the daemon's
+session. Instead `OwnedEvents` opens a private CDP WebSocket (a `cdp_use` client with no URL logging and no
+environment proxy for loopback), verifies the exact target with `Target.getTargetInfo`, attaches a separate observer
+session to it, registers `requestWillBeSent`/`loadingFinished`/`loadingFailed`, and acknowledges `Network.enable` on
+that session before the first input runs. Every await is bounded by `min(5, remaining budget)`; a bounded, drop-oldest
+queue records overflow as loss; a closed receiver is loss, never quiet; a failure stops the run with
+`event_connection_lost` and a sanitized message (no endpoint, ever, in messages, logs or run files).
+
+**Browser and Agent.** The first non-WAIT input starts tracking; only inputs that returned normally move the
+last-input time. Reads consume events (a 20 ms drain thread runs while Jev decides). Every DONE or BLOCKED answer,
+under any operation policy, waits while a tracked content request of this tab is in flight or ended within 100 ms, until
+5 s after the last input — no minimum wait, every poll checks the shared deadline and cancellation, and the wait
+records `[ms, capped, lost]` in `loading_waits`. The gate and the drain never evaluate the snapshot (an observe would
+advance the schema-2 generation and make every gated DONE stale). After an executed step — WAIT and scroll included —
+an observation `TimeoutError` is re-read at most twice (`repeated_reads`), each repeat checked against the stop first
+and counted only once started; nothing else is retried, and no repeat moves the last-input time. A valid new goal
+resets tracking after both validations; an invalid policy changes nothing. The two-WAIT handoff is unchanged: WAIT is
+not an input and starts no tracking.
+
+**Decision needed (Chrome's per-connection approval).** The owned source is a second DevTools client. With an explicit
+endpoint (`BU_CDP_WS`/`BU_CDP_URL`, daemon kind `cdp`, as in the lab) that costs nothing. With your own Chrome (daemon
+kind `local`), Chrome 144+ asks "Allow remote debugging?" for every new connection, so a connection per goal would prompt
+at the first input of every run, inside its 90 s budget. Options: (a) one owned connection per server process, opened at
+browser setup and reused by every goal (one extra approval per `jev-mcp` start); (b) the gate only for explicit
+endpoints, with today's behaviour on `local`. Never fall back to the daemon's destructive drain. **Default until you
+choose: (b), with (a) available behind `JEV_LOADING_GATE=1`.**
+
+**Tests.** `tests/test_readiness_contracts.py` holds the 30 ported inherited cases and the 10 plan-named ones, using a
+real `Browser` on a fake CDP with a `FakeEvents` source, a shared fake clock, and — for composition cases — the actual
+schema-2 snapshot adapter; four inherited nodes live in `test_agent.py`, `test_mcp_server.py` and `test_report_runs.py`.
+Superseded historical cases are replaced, not deleted: case 25's carry-over becomes a reset, case 26's late DONE becomes
+a stopped run, case 12's daemon error becomes `event_connection_lost`, and other sessions' event pressure becomes the
+tab's own. Real `OwnedEvents` is tested against a patched WebSocket (wrong target, distinct sessions, enable ordering,
+saturation, setup timeout cleanup, disconnect, close/join, no URL in errors or logs). The native composition test runs
+`run_goal` with a scripted `choose` against fixture pages with server-side submit counters (busy page, alert, the six
+§4 acceptance lines), and the OOPIF case uses an opt-in second fixture origin (`localhost` alias) in the lab, with the
+egress denial probes rerun and a real iframe target asserted first. New run-file fields (`loading_waits`,
+`repeated_reads`) are totalled by `report_runs`; result text for Claude is unchanged.
 
 ### 4.4 RELEASE
 
