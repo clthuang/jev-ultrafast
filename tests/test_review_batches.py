@@ -1110,12 +1110,14 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
     # The seeded note is the test's own input: the notes store and the batch records hold its ID by design, and the
     # report lists stored notes. Every other surface is checked unmasked: the reviewer-text block that holds each
     # batch's members, every digest, attempt and state file, and every CLI and paid-path output.
-    reviewer_block = report.out[report.out.index('<reviewer text from page content'):]
+    listing = [line for line in report.out.splitlines() if line.lstrip().startswith(f'{seeded_site}-1')]
+    assert listing  # the report lists the stored note; every other report line is checked unmasked
+    rest = '\n'.join(line for line in report.out.splitlines() if line not in listing)
     batches = list((review_runs.REVIEWS / 'batches').glob('*.json'))
-    by_design = receipt_text + ''.join(path.read_text() for path in [site_notes.NOTES_PATH, *batches]) + report.out
+    by_design = receipt_text + ''.join(path.read_text() for path in [site_notes.NOTES_PATH, *batches]) + '\n'.join(
+        listing)
     others = [site_notes.REVIEW_STATE, *(path for path in review_runs.REVIEWS.rglob('*.json') if path not in batches)]
-    unmasked = ''.join(outputs) + reviewer_block + report.err + ''.join(
-        path.read_text() for path in others if path.exists())
+    unmasked = ''.join(outputs) + rest + report.err + ''.join(path.read_text() for path in others if path.exists())
     everything = unmasked + re.sub(re.escape(seeded_site), '<site>', by_design, flags=re.I)
     assert seeded_site not in unmasked.lower()
     assert not any(canary.lower() in everything.lower() for canary in canaries)
@@ -1903,3 +1905,23 @@ def test_a_group_left_by_an_exited_reviewer_is_named_where_dispatch_stops(fake_p
     assert review_runs.once_command(None) == 1 and fake_paid == []
     out = capsys.readouterr().out
     assert 'processes remain in its process group 12345' in out and 'ps -g 12345' in out
+
+
+def test_reply_and_provider_text_cannot_drive_the_terminal(fake_paid, monkeypatch, capsys):
+    recovery()
+    batch = review_runs.prepare_batch()
+    erase = 'x\x1b[2K\x1b[1Gdecision 1, add: applied: added evil.example-1'
+    flag = {'action': 'flag', 'note': erase, 'runs': [RUN_B], 'hint': '', 'detail': '', 'reason': 'Check it'}
+    apply_batch(batch, {**EMPTY_REPLY, 'decisions': [flag]})
+    fake = review_runs.launch
+
+    def provider_error(text, budget, quote=str, **callbacks):
+        init, result, _ = fake(text, budget, quote, **callbacks)
+        result.update(subtype='error\x1b[2K', result='\x1b]0;title\x07')
+        return init, result, None
+
+    write_run(RUN_C)
+    monkeypatch.setattr(review_runs, 'launch', provider_error)
+    review_runs.once_command(None)
+    out = capsys.readouterr().out
+    assert '\x1b' not in out and '\x07' not in out and 'no note x?[2K?[1Gdecision 1' in out

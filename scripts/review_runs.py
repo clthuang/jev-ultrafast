@@ -140,6 +140,16 @@ def clip(text, limit=TEXT_CHARACTERS):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Control characters, such as ESC, that could drive a terminal from reply or provider text; the report filters the same.
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(line):
+    """A printed line with each control character as "?" and each lone surrogate replaced: reply and provider text
+    can neither forge nor erase a line on the terminal or in auto.log."""
+    return CONTROL.sub("?", str(line)).encode("utf-8", "replace").decode("utf-8")
+
+
 def clip_quoted(text, quote, limit=TEXT_CHARACTERS):
     """text quoted, clipped, and quoted again: a cut can end a longer word right after a value, making it whole."""
     return quote(clip(quote(text), limit))
@@ -886,7 +896,7 @@ def _apply_batch(batch, reply, cost=None, attempt_id=None):
         raise RecoveryPending(True) from error
     for number, record in enumerate(digest["decisions"], 1):
         result = "applied" if record["applied"] else "refused"
-        print(f"decision {number}, {record['action']}: {result}: {record['outcome']}")
+        print(printable(f"decision {number}, {record['action']}: {result}: {record['outcome']}"))
     return path, []
 
 
@@ -1419,10 +1429,10 @@ def launch_attempt(attempt, batch, membership=()):
         else:
             raise DispatchBlocked("Reviewer child exit is not verified; no new paid launch is allowed")
     for line in diagnostics:
-        print(line)
+        print(printable(line))
     print(f"review {attempt['attempt_id']}: {attempt['status']}; cost {money(attempt['cost'])}")
     if attempt.get("error"):
-        print(attempt["error"])
+        print(printable(attempt["error"]))
     return 0 if attempt["status"] == "succeeded" else 1
 
 
@@ -1517,7 +1527,7 @@ def apply_command(batch_id):
         reply = json.loads(sys.stdin.read())
         path, problems = record_review(reply, batch)
         if problems:
-            print("Reply refused: " + "; ".join(problems))
+            print(printable("Reply refused: " + "; ".join(problems)))
             return 1
     except RecoveryPending as error:
         if error.committed_now:
