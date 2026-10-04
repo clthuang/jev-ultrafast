@@ -1182,6 +1182,8 @@ def test_resolve_settles_an_unverifiable_attempt_only_after_terminal_confirmatio
 @pytest.mark.parametrize('liveness', ['leader alive', 'leader gone, group alive', 'group unknown'])
 @pytest.mark.parametrize('deadline', ['ahead', 'passed'])
 def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch, capsys, liveness, deadline):
+    """A reviewer or its group verifiably alive is refused without a question; when ps cannot list process groups,
+    only the user can say, and resolve asks. It never signals, expired or not."""
     claim = unverifiable_attempt()
     identity = review_runs.process_identity(12345)  # the fake reports this child alive with this identity
     claim.update(status='running', child={'pid': 12345, 'identity': identity, 'exited': False})
@@ -1191,11 +1193,58 @@ def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch
     if liveness != 'leader alive':
         monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})
     monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None if liveness == 'group unknown' else True)
-    monkeypatch.setattr(review_runs, 'open_terminal', lambda: pytest.fail('a live reviewer needs no confirmation'))
+    asked = []
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: asked.append(True) or io.StringIO('no\n'))
     monkeypatch.setattr(review_runs.os, 'killpg', lambda *args: pytest.fail('resolve never signals'))
     assert review_runs.main(['resolve', claim['attempt_id']]) == 1
-    assert 'may still run; nothing resolved' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    if liveness == 'group unknown':
+        assert asked and 'ps could not list process groups' in out and 'Not resolved.' in out
+    else:
+        assert not asked and out.startswith('Nothing resolved: its reviewer')
+        assert ('process group 12345' in out) is (liveness == 'leader gone, group alive')
     assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
+
+
+def test_resolve_checks_everything_again_after_its_confirmation(fake_paid, monkeypatch, capsys):
+    """A group that reappears while the user answers is refused on the confirmed pass, never settled."""
+    claim = unverifiable_attempt()
+    claim.update(status='running', child={'pid': 12345, 'identity': review_runs.process_identity(12345),
+                                          'exited': False})
+    review_runs.save_attempt(claim)
+    group = {'alive': None}
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: group['alive'])
+
+    def answer():
+        group['alive'] = True  # meanwhile a process of the review shows up in its group
+        return io.StringIO('yes\n')
+
+    monkeypatch.setattr(review_runs, 'open_terminal', answer)
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 1
+    assert 'Nothing resolved: its reviewer exited, but processes remain' in capsys.readouterr().out
+    assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
+
+
+@pytest.mark.parametrize('path', ['dispatch', 'resolve'])
+def test_recording_a_settled_attempts_exit_keeps_its_settled_status(fake_paid, monkeypatch, capsys, path):
+    write_run()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    claim.update(status='uncertain', error='The reply was lost', child={
+        'pid': 12345, 'identity': review_runs.process_identity(12345), 'exited': False})
+    review_runs.save_attempt(claim)
+    with review_runs.review_lock():
+        review_runs.settle_attempt(review_runs.read_state(), claim)
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})  # now verifiably ended
+    if path == 'dispatch':
+        with review_runs.review_lock():
+            review_runs.recover_attempts(review_runs.read_state())
+    else:
+        assert review_runs.main(['resolve', claim['attempt_id']]) == 0
+        assert 'Recorded the exit' in capsys.readouterr().out
+    [recorded] = attempts()
+    assert recorded['child']['exited'] is True and recorded['status'] == 'uncertain'
+    assert recorded['error'] == 'The reply was lost' and review_runs.read_state()['failures'] == 1
 
 
 @pytest.mark.parametrize('attempt_id', ['not-an-id', 'a' * 32])
@@ -1826,3 +1875,31 @@ def test_a_legacy_digest_named_for_a_time_no_reader_can_convert_is_skipped(capsy
     assert records == [] and [path.name for path, _ in errors] == ['00010101-000000.json']
     lines = report_runs.review_lines(review_runs.REVIEWS, [], set(), set())
     assert 'invalid review record' in capsys.readouterr().err and isinstance(lines, list)
+
+
+def test_an_unreadable_notes_file_is_named_by_apply_and_resolve(fake_paid, monkeypatch, capsys):
+    claim = unverifiable_attempt()
+    batch = review_runs.prepare_batch()
+
+    def unreadable(*args, **kwargs):
+        raise site_notes.NotesStoreError('injected EIO')
+
+    monkeypatch.setattr(site_notes, 'read_envelope', unreadable)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(EMPTY_REPLY)))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    assert 'The notes file cannot be read' in capsys.readouterr().out
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 1
+    assert 'Nothing resolved: the notes file cannot be read' in capsys.readouterr().out
+
+
+def test_a_group_left_by_an_exited_reviewer_is_named_where_dispatch_stops(fake_paid, monkeypatch, capsys):
+    claim = unverifiable_attempt()
+    claim.update(status='running', child={'pid': 12345, 'identity': review_runs.process_identity(12345),
+                                          'exited': False})
+    review_runs.save_attempt(claim)
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: True)
+    monkeypatch.setattr(review_runs.os, 'killpg', lambda *args: pytest.fail('a leaderless group is never signalled'))
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    out = capsys.readouterr().out
+    assert 'processes remain in its process group 12345' in out and 'ps -g 12345' in out

@@ -1203,18 +1203,31 @@ def stop_expired(attempt):
     return False
 
 
-def reviewer_may_run(child):
-    """Whether the recorded reviewer, or a process left in its group, may still run. It never signals. A PID in use as
-    a process group ID is never given to a new process (Linux and macOS), so another process at the PID means the
-    reviewer's group has ended."""
+def reviewer_liveness(child):
+    """Why the recorded reviewer, or a process left in its group, still runs; None when nothing shows that it does,
+    and only the user can confirm the rest. It never signals. A PID in use as a process group ID is never given to a
+    new process (Linux and macOS), so another process at the PID means the reviewer's group has ended."""
     pid, identity = child.get("pid"), child.get("identity") or {}
     if type(pid) is not int or pid <= 1:
-        return False  # no child was recorded: only the user can say that no review runs
+        return None  # no child was recorded: only the user can say that no review runs
     current = process_identity(pid)
     if current.get("state") == "present":
         recorded = identity.get("birth")
-        return recorded is None or current.get("birth") == recorded
-    return group_alive(pid) is not False
+        return f"its reviewer, process {pid}, still runs" if recorded in (None, current.get("birth")) else None
+    if group_alive(pid):
+        return f"its reviewer exited, but processes remain in its process group {pid}"
+    return None
+
+
+def blocked_reason(attempt):
+    """Why an unsettled attempt blocks paid dispatch, and what ends it: IDs and process numbers only."""
+    reason, command = reviewer_liveness(attempt.get("child") or {}), f"{RESOLVE_COMMAND} {attempt['attempt_id']}"
+    if reason and "process group" in reason:
+        return (f"An earlier review's {reason}; inspect them (ps -g {attempt['child']['pid']}) and stop them if they "
+                f"belong to it: the next review then settles it, or run: {command}")
+    if reason:
+        return f"An earlier review is still running: {reason}; the next review stops it at its deadline"
+    return f"An earlier reviewer's process cannot be verified; once no review runs, settle it with: {command}"
 
 
 def settle_attempt(state, attempt):
@@ -1280,8 +1293,7 @@ def recover_attempts(state, *, stop=None):
         elif stop is not None and expired_owned(attempt, time.time()):
             stop.append(attempt)
         else:
-            raise DispatchBlocked("An earlier reviewer is live or its child ownership is unknown; once no review "
-                                  f"runs, settle it with: {RESOLVE_COMMAND} {attempt['attempt_id']}")
+            raise DispatchBlocked(blocked_reason(attempt))
 
 
 def claim_attempt(state, kind, batch, now):
@@ -1525,6 +1537,10 @@ def apply_command(batch_id):
     except ReplyConflict:
         print("A different reply is already committed for this batch; nothing was applied.")
         return 1
+    except site_notes.NotesStoreError:
+        print("The notes file cannot be read, so whether this reply's decisions are already committed is unknown; "
+              f"inspect artifacts/site-notes.json, then run: {RECOVER_COMMAND}")
+        return 1
     except (OSError, ValueError):
         # Raw parser/provider/filesystem exceptions can quote untrusted values.
         print("Reply could not be applied; inspect batch freshness and storage, then recover before retrying.")
@@ -1634,11 +1650,15 @@ def resolve_step(attempt_id, confirmed):
             return 0, f"Recorded the exit of {attempt_id}'s reviewer; it was already settled."
         settle_ended(state, attempt, committed)
         return 0, f"Resolved {attempt_id}: its reviewer has ended; {attempt['status']}."
-    if reviewer_may_run(child):
-        return 1, (f"The reviewer of {attempt_id}, or a process in its group, may still run; nothing resolved. "
-                   "The next review stops it at its deadline.")
+    if reason := reviewer_liveness(child):
+        then = ("stop them if they belong to the review, then resolve again" if "process group" in reason else
+                "the next review stops it at its deadline")
+        return 1, f"Nothing resolved: {reason}; {then}."
     if not confirmed:
-        return None, (f"No reviewer process of {attempt_id} can be verified. " + (
+        unknown = (" ps could not list process groups, so none can be checked." if type(child.get("pid")) is int
+                   and process_identity(child["pid"]).get("state") != "present" and group_alive(child["pid"]) is None
+                   else "")
+        return None, (f"No reviewer process of {attempt_id} can be verified.{unknown} " + (
             "Recording that it ended counts nothing again." if settled else
             "Settling it counts one failed review and never repeats it."))
     if attempt is None:  # running names an attempt whose record never reached the disk
@@ -1692,6 +1712,9 @@ def resolve_command(attempt_id):
         return 1
     except RecoveryPending:
         print(f"A committed review's digest is pending recovery; run: {RECOVER_COMMAND}, then resolve again.")
+        return 1
+    except site_notes.NotesStoreError:
+        print("Nothing resolved: the notes file cannot be read; inspect artifacts/site-notes.json, then resolve again.")
         return 1
     except (OSError, ValueError):  # an unreadable state or attempt record; its text could quote a file
         print("Nothing resolved: the review state or an attempt record cannot be read or saved; "
