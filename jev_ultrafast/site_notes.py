@@ -424,7 +424,8 @@ class NotesStoreError(ValueError):
 
 
 def validate_envelope(envelope):
-    if not isinstance(envelope, dict) or type(envelope.get("schema_version")) is not int or envelope["schema_version"] != 2:
+    if (not isinstance(envelope, dict) or type(envelope.get("schema_version")) is not int
+            or envelope["schema_version"] != 2):
         raise NotesStoreError("unsupported notes schema")
     if not isinstance(envelope.get("notes"), list) or not all(map(well_formed, envelope["notes"])):
         raise NotesStoreError("a note lacks a field, or has one of the wrong type")

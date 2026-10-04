@@ -36,8 +36,9 @@ def base_projection(run):
     """Only review evidence, privacy sources and linkage affect a run's version."""
     page, result = run.get('page') or {}, run.get('result')
     return {
-        'goal': run.get('goal'), 'call': {key: (run.get('call') or {}).get(key)
-                                       for key in ('goal', 'url', 'allowed_operations', 'allowed_sites', 'allow_commit')},
+        'goal': run.get('goal'),
+        'call': {key: (run.get('call') or {}).get(key)
+                 for key in ('goal', 'url', 'allowed_operations', 'allowed_sites', 'allow_commit')},
         'previous_run': run.get('previous_run'), 'has_previous_run': 'previous_run' in run, 'pid': run.get('pid'),
         'page': {key: page.get(key) for key in ('url', 'title')}, 'outcome': run.get('outcome', []),
         'result': None if result is None else {key: result.get(key) for key in ('status', 'notes')},
@@ -205,7 +206,8 @@ def validate(record, kind):
         if any(type(record.get(key)) is not int or record[key] != 1
                for key in ('summary_version', 'fingerprint_version', 'scrubber_version')):
             raise RecordError('Unsupported batch semantic version')
-        if not string(record.get('source_revision')) or not all(version_map(record.get(key)) for key in ('runs', 'notes')):
+        if not string(record.get('source_revision')) or not all(
+                version_map(record.get(key)) for key in ('runs', 'notes')):
             raise RecordError('Malformed batch evidence')
         if item_maps(record.get('items')) != {key: record[key] for key in ('runs', 'notes')}:
             raise RecordError('Batch input membership differs from item versions')

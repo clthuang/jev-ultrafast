@@ -475,8 +475,11 @@ def summaries(queue):
     with every queued run's task values replaced (v4.4), a note's too, since its detail may hold a word another run
     typed."""
     rules = scrubber(queue["values"], queue["names"], queue["exclude"], queue["run_ids"])
-    blocks = [run_summary(run_id, run, queue["reasons"][run_id], rules, queue.get("nonces", {}).get(run_id)) for run_id, run in queue["runs"].items()]
-    blocks += [note_summary(note, queue["note_reasons"][key], rules, queue.get("nonces", {}).get(key)) for key, note in queue["notes"].items()]
+    nonces = queue.get("nonces", {})
+    blocks = [run_summary(run_id, run, queue["reasons"][run_id], rules, nonces.get(run_id))
+              for run_id, run in queue["runs"].items()]
+    blocks += [note_summary(note, queue["note_reasons"][key], rules, nonces.get(key))
+               for key, note in queue["notes"].items()]
     return "\n\n".join(blocks) + "\n" if blocks else ""
 
 
@@ -597,7 +600,8 @@ def verify_batch(batch, runs, notes, exclude):
             or any(key not in runs or review_records.base_version(runs[key]) != version
                    for key, version in deps["runs"].items())
             or review_records.relations(runs, deps["relations"]) != deps["relations"]
-            or {note["id"]: note_hash(note) for note in notes if review_records.digest(note["site"]) in deps["note_site_hashes"]} != deps["notes"]):
+            or {note["id"]: note_hash(note) for note in notes
+                if review_records.digest(note["site"]) in deps["note_site_hashes"]} != deps["notes"]):
         raise Superseded("Batch dependencies changed; prepare a new batch")
     queue = build_queue(batch.get("since"), all_runs=runs, notes=notes, exclude=exclude)
     if (any(queue["versions"].get(key) != version for key, version in batch["runs"].items())
@@ -661,7 +665,8 @@ def unapproved(notes, note_id):
     if note is None:
         raise DecisionRefused(f"no note {clip(note_id, LABEL_CHARACTERS)}")
     if note["approved"]:
-        raise DecisionRefused(f"{note_id} is approved, and a review never retires, flags or changes a note you approved")
+        raise DecisionRefused(
+            f"{note_id} is approved, and a review never retires, flags or changes a note you approved")
     return note
 
 
@@ -762,7 +767,8 @@ def _apply_batch(batch, reply, cost=None, attempt_id=None):
                         if holds_value(decision[key], values, kept, queue["run_ids"])]
                 try:
                     if held:
-                        raise DecisionRefused(f"its {' and '.join(held)} {'hold' if len(held) > 1 else 'holds'} a value from a task")
+                        verb = "hold" if len(held) > 1 else "holds"
+                        raise DecisionRefused(f"its {' and '.join(held)} {verb} a value from a task")
                     outcome, applied = apply_decision_to(envelope["notes"], decision, queue), True
                 except DecisionRefused as error:
                     outcome, applied = str(error), False
@@ -802,7 +808,8 @@ def _apply_batch(batch, reply, cost=None, attempt_id=None):
     recover_pending()
     digest = review_records.read(path, "digest")
     for number, record in enumerate(digest["decisions"], 1):
-        print(f"decision {number}, {record['action']}: {'applied' if record['applied'] else 'refused'}: {record['outcome']}")
+        result = "applied" if record["applied"] else "refused"
+        print(f"decision {number}, {record['action']}: {result}: {record['outcome']}")
     return path, []
 
 
@@ -1063,7 +1070,8 @@ def read_state():
         return {"schema_version": 1, "accounted_attempt_ids": []}
     except (OSError, ValueError) as error:
         raise review_records.RecordError("Unreadable review state; paid dispatch stopped") from error
-    if (not isinstance(state, dict) or (type(state.get("schema_version", 1)) is not int or state.get("schema_version", 1) != 1)
+    schema_version = state.get("schema_version", 1) if isinstance(state, dict) else None
+    if (not isinstance(state, dict) or type(schema_version) is not int or schema_version != 1
             or not isinstance(state.get("accounted_attempt_ids", []), list)
             or any(not isinstance(key, str) or not review_records.ID.fullmatch(key)
                    for key in state.get("accounted_attempt_ids", []))
@@ -1217,7 +1225,8 @@ def launch_attempt(attempt, batch):
             with review_lock():
                 with run_store.metadata_lock(RUNS, create=True):
                     queue = site_notes.transaction(lambda envelope: verify_batch(
-                        batch, load_runs(), envelope["notes"], site_notes.read_exclude(site_notes.EXCLUDE_PATH)), write=False)
+                        batch, load_runs(), envelope["notes"], site_notes.read_exclude(site_notes.EXCLUDE_PATH)),
+                        write=False)
                 quote = privacy_quote(queue)
         init, result, failure = launch(attempt["sent_text"], attempt["budget_usd"], quote,
                                       before_spawn=spawning,
@@ -1300,7 +1309,8 @@ def paid_command(kind, since=None):
                     return 0
                 batch = None if kind == "preflight" else _prepare_batch(day(AUTO_FROM) if kind == "auto" else since)
                 if batch:
-                    queue = {"runs": {*batch["runs"], *(item["id"] for item in batch["deferred"] if item["kind"] == "runs")}}
+                    deferred = (item["id"] for item in batch["deferred"] if item["kind"] == "runs")
+                    queue = {"runs": {*batch["runs"], *deferred}}
                     if (kind == "auto" and not enough_waiting(queue, now)
                             or not batch["runs"] and not batch["notes"]):
                         started = datetime.fromtimestamp(int(now)).isoformat()
@@ -1311,7 +1321,8 @@ def paid_command(kind, since=None):
                 attempt = claim_attempt(state, kind, batch, now)
             return launch_attempt(attempt, batch)
     except (OSError, ValueError):
-        print("Review stopped: storage, exclusions, or reviewer ownership require recovery; no automatic retry was made.")
+        print("Review stopped: storage, exclusions, or reviewer ownership require recovery; "
+              "no automatic retry was made.")
         return 0 if kind == "auto" else 1
 
 
@@ -1337,7 +1348,8 @@ def apply_command(batch_id):
             print("Reply refused: " + "; ".join(problems))
             return 1
     except store_io.PublicationUncertain:
-        print("Publication is uncertain; recover the pending receipt before retrying. Decisions may already be committed.")
+        print("Publication is uncertain; recover the pending receipt before retrying. "
+              "Decisions may already be committed.")
         return 1
     except (OSError, ValueError):
         # Raw parser/provider/filesystem exceptions can quote untrusted values.

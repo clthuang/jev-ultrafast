@@ -447,11 +447,13 @@ def test_report_counts_same_tab_runs_after_a_jev_stop(tmp_path, capsys):
     ) in lines
 
 
-import pytest  # noqa: E402
-from jev_ultrafast import review_records  # noqa: E402
-from jev_ultrafast.store_io import canonical_bytes  # noqa: E402
 import hashlib  # noqa: E402
 import time  # noqa: E402
+
+import pytest  # noqa: E402
+
+from jev_ultrafast import review_records  # noqa: E402
+from jev_ultrafast.store_io import canonical_bytes  # noqa: E402
 
 
 def v2_record(identifier, created='2026-10-03T10:00:00', cost=0.1, attempt_id=None):

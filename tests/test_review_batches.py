@@ -281,7 +281,8 @@ def test_changed_privacy_contributor_supersedes_batch(monkeypatch, change):
 def test_semantic_refusal_preserves_valid_neighbor():
     recovery()
     batch = review_runs.prepare_batch()
-    path, _ = apply_batch(batch, {**EMPTY_REPLY, 'decisions': [add_decision(detail='https://bad.test/'), add_decision()]})
+    reply = {**EMPTY_REPLY, 'decisions': [add_decision(detail='https://bad.test/'), add_decision()]}
+    path, _ = apply_batch(batch, reply)
     digest = json.loads(path.read_text())
     assert [item['applied'] for item in digest['decisions']] == [False, True]
     assert digest['acknowledged']['runs'] == batch['runs']
@@ -349,7 +350,10 @@ def test_crash_at_each_publication_boundary(monkeypatch, boundary):
     fired = []
 
     def publish(path, value, **options):
-        phase = ('notes' if value.get('pending_review') else 'cleanup') if path.name == site_notes.NOTES_PATH.name else 'digest'
+        if path.name == site_notes.NOTES_PATH.name:
+            phase = 'notes' if value.get('pending_review') else 'cleanup'
+        else:
+            phase = 'digest'
         if not fired and boundary == 'before_' + phase:
             fired.append(boundary)
             raise OSError('injected before publication')
@@ -457,9 +461,9 @@ def test_legacy_requeue_happens_once():
     assert RUN_A in review_runs.build_queue()['runs']
 
 
-from types import SimpleNamespace  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 
 @pytest.fixture
@@ -467,8 +471,8 @@ def fake_paid(monkeypatch):
     monkeypatch.setenv("JEV_AUTO_REVIEW", "1")
     monkeypatch.setenv("JEV_LEARNING", "1")
     calls = []
-    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'present', 'pid': pid,
-                                                                   'birth': '100:123', 'uid': review_runs.os.getuid(), 'pgid': pid})
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {
+        'state': 'present', 'pid': pid, 'birth': '100:123', 'uid': review_runs.os.getuid(), 'pgid': pid})
     monkeypatch.setattr(review_runs, 'group_alive', lambda pid: False)
 
     def launch(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
@@ -589,8 +593,11 @@ def test_abandoned_claim_settles_uncertain_once(fake_paid):
     assert fake_paid == []
 
 
-@pytest.mark.parametrize('status,child', [('spawning', None), ('running', {'pid': 12345, 'identity':
-    {'state': 'present', 'pid': 12345, 'birth': '100:122', 'uid': review_runs.os.getuid(), 'pgid': 12345}, 'exited': False})])
+REUSED_CHILD = {'pid': 12345, 'exited': False, 'identity': {
+    'state': 'present', 'pid': 12345, 'birth': '100:122', 'uid': review_runs.os.getuid(), 'pgid': 12345}}
+
+
+@pytest.mark.parametrize('status,child', [('spawning', None), ('running', REUSED_CHILD)])
 def test_unknown_or_reused_child_blocks_paid_launch_without_signalling(fake_paid, monkeypatch, status, child):
     write_run()
     batch = review_runs.prepare_batch()
@@ -692,7 +699,8 @@ def test_batch_corruption_is_rejected_before_application(mutation):
     if mutation == 'empty_dependencies':
         broken['dependencies'] = {}
     elif mutation.startswith('missing_'):
-        broken.pop({'missing_source': 'source_revision', 'missing_items': 'items', 'missing_sent': 'sent_text'}[mutation])
+        missing = {'missing_source': 'source_revision', 'missing_items': 'items', 'missing_sent': 'sent_text'}
+        broken.pop(missing[mutation])
     elif mutation == 'unknown_summary':
         broken['summary_version'] = 2
     else:

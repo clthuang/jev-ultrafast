@@ -16,8 +16,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 from examples.flights import verify  # noqa: E402
-from jev_ultrafast import review_records
-
+from jev_ultrafast import review_records  # noqa: E402
 from jev_ultrafast.contracts import token_usage, validate_allowed_operations  # noqa: E402
 from jev_ultrafast.site_notes import (  # noqa: E402
     EXCLUDE_PATH,
