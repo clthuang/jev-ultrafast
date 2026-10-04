@@ -1223,20 +1223,30 @@ def reviewer_liveness(child):
     current = process_identity(pid)
     if current.get("state") == "present":
         recorded = identity.get("birth")
-        return f"its reviewer, process {pid}, still runs" if recorded in (None, current.get("birth")) else None
+        if recorded is None:  # unread at spawn: whether this process is the reviewer cannot be told
+            return f"process {pid} holds its reviewer's process number, and the reviewer's identity was never read"
+        return f"its reviewer, process {pid}, still runs" if current.get("birth") == recorded else None
     if group_alive(pid):
         return f"its reviewer exited, but processes remain in its process group {pid}"
     return None
 
 
+def liveness_advice(reason, pid):
+    """What ends a wait that reviewer_liveness() names."""
+    if "process group" in reason:
+        return f"inspect them (ps -g {pid}) and stop them if they belong to the review"
+    if "never read" in reason:
+        return f"inspect process {pid} and stop it if it is the review, or wait for it to end"
+    return "the next review stops it at its deadline"
+
+
 def blocked_reason(attempt):
     """Why an unsettled attempt blocks paid dispatch, and what ends it: IDs and process numbers only."""
     reason, command = reviewer_liveness(attempt.get("child") or {}), f"{RESOLVE_COMMAND} {attempt['attempt_id']}"
-    if reason and "process group" in reason:
-        return (f"An earlier review's {reason}; inspect them (ps -g {attempt['child']['pid']}) and stop them if they "
-                f"belong to it: the next review then settles it, or run: {command}")
     if reason:
-        return f"An earlier review is still running: {reason}; the next review stops it at its deadline"
+        advice = liveness_advice(reason, attempt["child"]["pid"])
+        then = "" if advice.startswith("the next review") else f"; then the next review settles it, or run: {command}"
+        return f"An earlier review cannot be settled yet: {reason}; {advice}{then}"
     return f"An earlier reviewer's process cannot be verified; once no review runs, settle it with: {command}"
 
 
@@ -1661,16 +1671,17 @@ def resolve_step(attempt_id, confirmed):
         settle_ended(state, attempt, committed)
         return 0, f"Resolved {attempt_id}: its reviewer has ended; {attempt['status']}."
     if reason := reviewer_liveness(child):
-        then = ("stop them if they belong to the review, then resolve again" if "process group" in reason else
-                "the next review stops it at its deadline")
-        return 1, f"Nothing resolved: {reason}; {then}."
+        advice = liveness_advice(reason, child["pid"])
+        then = "" if advice.startswith("the next review") else ", then resolve again"
+        return 1, f"Nothing resolved: {reason}; {advice}{then}."
     if not confirmed:
         unknown = (" ps could not list process groups, so none can be checked." if type(child.get("pid")) is int
                    and process_identity(child["pid"]).get("state") != "present" and group_alive(child["pid"]) is None
                    else "")
-        return None, (f"No reviewer process of {attempt_id} can be verified.{unknown} " + (
-            "Recording that it ended counts nothing again." if settled else
-            "Settling it counts one failed review and never repeats it."))
+        outcome = ("Recording that it ended counts nothing again." if settled else
+                   "Its committed review settles it as succeeded." if attempt_id in committed else
+                   "Settling it counts one failed review and never repeats it.")
+        return None, f"No reviewer process of {attempt_id} can be verified.{unknown} {outcome}"
     if attempt is None:  # running names an attempt whose record never reached the disk
         count_failure(state)
         state.update(running=None, accounted_attempt_ids=[*state["accounted_attempt_ids"], attempt_id])

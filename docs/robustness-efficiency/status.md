@@ -15,9 +15,9 @@ changed, as §2 and §3 record.
 | Select | SELECT-1…2, GATE-SELECT | Done, 2026-10-03 | Original machine: 333 offline + 30 native; 19 changed-state cases reject before input; reviewer `execution_review` READY |
 | Limits | LIMITS-1…2, GATE-LIMITS | Done, 2026-10-04 | Original machine: 15 named nodes / 45 variants, 422 focused tests; reviewer `browser_review` READY |
 | Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
-| Reviews | REVIEWS-1…7, GATE-REVIEWS | In progress | See §4 |
-| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Not started | — |
-| Readiness | READINESS-1…3, GATE-READINESS | Not started | — |
+| Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
+| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Implemented; gate review pending | Cloud: 10 named nodes / 50 variants with `--native`, 32 native tests, `check_guards.py` 23 checks; parity and payload measurements in §4.2 |
+| Readiness | READINESS-1…3, GATE-READINESS | In progress | §4.3 |
 | Release | RELEASE-1…3, GATE-RELEASE | Not started | — |
 
 Re-run in the cloud on 2026-10-04 at `a94014b` (main after consolidation): every plan-named node through REVIEWS-7
@@ -120,6 +120,22 @@ test that fails on the reviewer's mutant (18 mutants of the should-fix items and
 | R15 | A settled attempt whose verified exit was never saved blocked dispatch for good (execution, should-fix) | The final section saves the verified exit before settlement; `resolve` records the exit of a settled attempt without counting it again |
 | R16 | Pass lines without a pinning test (execution, should-fix) | Tests for the uncertain notes publication through the CLI, committed evidence in the final section and in later recovery, the accounted-ID guard, a group outliving its leader, and the identity check before each signal |
 | R17 | Nits: exit-record failure lost the reply and cost; `apply` hid BUSY and a conflicting reply; short locks held while stopping a child; `running` untyped; report printed an exception's repr; clipping could make a value whole; year-1 times crashed readers | Fixed, each with a test: `on_exit` failures are contained; distinct `apply` messages; an expired reviewer is stopped holding only the dispatch lock; `running` and `last_start` validated; exception type only; quote–clip–quote; `valid_time` uses `timestamp()` |
+
+**Round 2 (`0456e40`): execution READY with nits; privacy HOLD on test evidence only.** Every round-1 finding
+reproduced as fixed. Privacy: each half of R9 (the closure URL check, the whole-chain check) could be removed without
+a test failing, the report's deferred IDs were masked by the test, and a launched review's membership lines were
+unasserted — now pinned (`3cdcfb5`); an echoed note ID with a line break could forge an output line (whitespace
+folded); "still queued" was wrong after a later batch (reworded); a year-1 legacy digest name crashed the report
+(validated). Execution: a reviewer whose leader exited while its group lived was blocked with circular guidance, and
+`ps` failing made it unresolvable — dispatch and `resolve` now name the group, `resolve` asks the user when `ps`
+cannot tell, and a leaderless group is never signalled (`9b10c8f`); unreadable notes files are named.
+
+**Round 3 (`3cdcfb5`, `9b10c8f`): both READY.** Remaining nits fixed after the verdicts: reply and provider text that
+review_runs prints passes the report's control-character filter, and the privacy test masks only the seeded note's
+listing (`7767e39`); dispatch and `resolve` name a process whose identity was never read instead of promising the next
+review stops it, and `resolve`'s question says when committed evidence settles the attempt as succeeded (this commit).
+Commands at the closing commit: `scripts/plan_tests.py PRIVACY RUNS REVIEWS` (53 nodes / 76 variants), the full
+offline suite and Ruff, all passing.
 
 ### 4.2 SNAPSHOT: schema-2 snapshots
 

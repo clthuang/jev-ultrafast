@@ -1228,7 +1228,7 @@ def test_resolve_checks_everything_again_after_its_confirmation(fake_paid, monke
     assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
 
 
-@pytest.mark.parametrize('path', ['dispatch', 'resolve'])
+@pytest.mark.parametrize('path', ['dispatch', 'resolve', 'resolve, confirmed'])
 def test_recording_a_settled_attempts_exit_keeps_its_settled_status(fake_paid, monkeypatch, capsys, path):
     write_run()
     claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
@@ -1241,9 +1241,14 @@ def test_recording_a_settled_attempts_exit_keeps_its_settled_status(fake_paid, m
     if path == 'dispatch':
         with review_runs.review_lock():
             review_runs.recover_attempts(review_runs.read_state())
-    else:
+    elif path == 'resolve':
         assert review_runs.main(['resolve', claim['attempt_id']]) == 0
         assert 'Recorded the exit' in capsys.readouterr().out
+    else:  # ps cannot list process groups: the user confirms, and only the exit is recorded
+        monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None)
+        monkeypatch.setattr(review_runs, 'open_terminal', lambda: io.StringIO('yes\n'))
+        assert review_runs.main(['resolve', claim['attempt_id']]) == 0
+        assert 'counts nothing again' in capsys.readouterr().out
     [recorded] = attempts()
     assert recorded['child']['exited'] is True and recorded['status'] == 'uncertain'
     assert recorded['error'] == 'The reply was lost' and review_runs.read_state()['failures'] == 1
@@ -1925,3 +1930,24 @@ def test_reply_and_provider_text_cannot_drive_the_terminal(fake_paid, monkeypatc
     review_runs.once_command(None)
     out = capsys.readouterr().out
     assert '\x1b' not in out and '\x07' not in out and 'no note x?[2K?[1Gdecision 1' in out
+
+
+def test_resolve_names_what_settles_an_attempt_and_what_blocks_it(fake_paid, monkeypatch, capsys):
+    """Its question says when committed evidence settles the attempt as succeeded; a process at the reviewer's PID
+    whose identity was never read is named as such, never promised to the next review."""
+    recovery()
+    batch = review_runs.prepare_batch()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', batch, time.time() - 10000)
+    claim.update(status='running', child={'pid': 12345, 'identity': {'state': 'unknown'}, 'exited': False})
+    review_runs.save_attempt(claim)
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    out = capsys.readouterr().out
+    assert "the reviewer's identity was never read" in out and 'inspect process 12345' in out
+    assert 'stops it at its deadline' not in out
+    with review_runs.review_lock():
+        review_runs._apply_batch(batch, EMPTY_REPLY, 0.0123, claim['attempt_id'])
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {'state': 'absent'})
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: None)
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: io.StringIO('no\n'))
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 1
+    assert 'Its committed review settles it as succeeded.' in capsys.readouterr().out
