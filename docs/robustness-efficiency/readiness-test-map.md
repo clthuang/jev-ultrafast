@@ -1,6 +1,6 @@
 # Readiness inheritance and owned event adapter
 
-Status: implementation preparation only. The nodes below are proposed exact test destinations, not claims that tests exist or pass. No runtime source was edited and no browser, service, network connection or model was invoked for this preparation.
+Status: implemented on 2026-10-04. The tables below were the preparation's exact destinations; every node now exists and passes, with the deviations recorded in [Implementation record](#implementation-record). The adapter is `websockets`' sync client rather than `cdp_use`, with the same lifecycle, session and queue contract.
 
 ## Evidence and precedence
 
@@ -119,3 +119,49 @@ Keep the action connection through browser-harness unchanged. Add a small privat
 Public API evidence was inspected locally under candidate `.venv/lib/python3.13/site-packages`: `browser_harness/helpers.py:80` and `daemon.py:678–680` prove the global drain clears all events; `daemon.py:264–342` implements resolver behavior; `cdp_use/client.py:229–299,361–389` exposes client lifecycle/raw calls; `cdp_use/cdp/network/registration.py:96–123,158–171` exposes the three callbacks. No dependency modification is needed.
 
 Add focused adapter tests for target mismatch before enable/input, distinct observer/action sessions, Network.enable ordering, another source's queue untouched, saturation, setup timeout cleanup, disconnect with no pending command, consumer join, receiver close and valid/invalid continuation lifecycle. The existing native manifest/endpoint guard applies before any direct WebSocket connection.
+
+## Implementation record
+
+Command: `uv run python scripts/plan_tests.py READINESS --native`, which collects every node above (the plan's
+Verify nodes plus `readiness-required-tests.json`) and fails on a missing node, an empty collection or any failed,
+skipped or xfailed variant: 45 named nodes, 48 variants passed (47 offline, 1 native), no problems. Each row's
+assertions are as specified above, except where noted here.
+
+- **§2.5 cases 1, 2:** as specified. Case 2 also pins `READ_TIMEOUT_REPEATS == 2` literally, so a smaller cap fails.
+- **§2.5 case 4:** the stop is armed by the first post-step read's own timeout (a phase trigger, not a call count).
+- **§2.5 case 5:** "exactly one observe" is one `Browser.observe` call after the step; inside it, browser.py's existing
+  settle loop re-reads a navigating document up to 10 times, which is not a §2 repeat. The RuntimeError variant stops
+  the run with `execution_error`; the StalePage variant leaves it running for tick's recovery.
+- **§4.6 case 1:** the fake source holds only the tab's own events, so the other-session half is asserted on the real
+  connection: `test_another_sessions_traffic_is_never_taken` (600 events on another session neither delivered nor
+  counted as loss; no import, name or attribute `drain_events` in `events.py` or `browser.py`).
+- **§4.6 cases 7, 9, 11, 14, 20 (pressure):** own-session Image events stand in for the old shared-buffer pressure.
+  Loss is the source's explicit overflow flag; a read of exactly 500 events is not loss (pinned on the real queue).
+- **§4.6 case 9:** the drain thread runs on the real clock and the test waits for the queue to empty, instead of a
+  barrier inside `choose`; case 10 asserts the enter/choose/exit order around the real `predict`.
+- **§4.6 case 12 (replaced):** `EventConnectionLost` is a `RunStopped` (a `ValueError`, like every structured stop), not
+  a `RuntimeError`; its message is "The loading wait's browser connection closed."; the run is stopped with
+  `event_connection_lost`, one source only (no reconnect), the run file saved.
+- **§4.6 case 15:** the drain thread is found by its name, `jev-drain`, so unrelated threads cannot mask a survivor.
+- **§4.6 case 19:** the fake source acknowledges `Network.enable` in its constructor, which `Browser.act` calls before
+  the input; the input asserts the acknowledgment is already recorded.
+- **§4.6 cases 25, 26 (replaced):** as specified. Case 25 runs on the actual snapshot adapter (no read, the same
+  generation, for an invalid policy; one new read for a valid goal), so it is also the composition node. Case 26's
+  completed DONE stays accounted with `discarded` set to the stop's code.
+- **Composition nodes:** `test_loading_gate_respects_shared_deadline_and_policy` also asserts that Jev was never offered
+  WAIT under a CLICK-only policy and that the stopped DONE reached no freshness check;
+  `test_timeout_retries_preserve_single_input_and_uncertain_attempt` records the uncertain input's phases
+  (`mouse_press_uncertain`, input started) and that it set no loading deadline.
+- **Additional tests, not in the tables:** the first input's setup is bounded by the run's remaining budget and
+  followed by its stop check; a source that cannot attach stops the run before the input; the final read never touches
+  the source (`test_the_final_read_never_touches_the_source`, and the server passes `track=False`); the gate modes;
+  your own Chrome's connection opens at setup, or at a new goal's setup, never inside a run.
+- **Native acceptance:** the composition node and §4's six local lines run in the owned lab against
+  `tests/fixtures/readiness.html`; §2's H5 acceptance is
+  `tests/test_browser_native.py::test_busy_page_reads_again_without_repeating_the_input` (5 busy-page trials and the
+  dialog trial). The cross-site iframe uses the lab's second fixture site, `jev-frame.test` at the fixture's port, not
+  `localhost`; the test first asserts a real out-of-process iframe target, then that its document request arrived as
+  the iframe's own frame. The egress proof was rerun with the new site (canary: 0 connections). Results: status.md §4.3.
+- **Withdrawn, not passed:** §2.5 cases 3 and 7 and the live checks 10 and 11, as specified above.
+- **Not performed:** the historical live-site trials (H8c/H8d, and H5 on arXiv). They need live sites and paid models
+  and remain validation limits.

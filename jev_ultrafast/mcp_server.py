@@ -176,7 +176,9 @@ def start_run(goal, url, allowed_operations, allowed_sites, allow_commit, foregr
     WINDOW_SHOWN = False
     notes = []
 
-    def check_stop():  # Agent owns execution timing; this adapter owns cancellation and shutdown.
+    # Agent owns execution timing; this adapter owns cancellation and shutdown. It runs between steps, before each
+    # text call, input and repeated read, and while waiting for loading.
+    def check_stop():
         anyio.from_thread.check_cancelled()  # raises when the MCP call is cancelled
         if STOP.is_set():
             raise RunStopped("shutdown", "the server is shutting down")
@@ -243,7 +245,7 @@ def finish(agent, run_id, notes):
         return remaining
 
     try:
-        page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False,
+        page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False, track=False,
                                      check_stop=final_remaining, remaining_budget=final_remaining)
         image = base64.b64decode(page.pop("screenshot"))
         state["page"] = page  # the run file ends with the final page
@@ -558,9 +560,9 @@ def close_browser():
 
 
 def shut_down(*_signal):
-    STOP.set()  # this server's run stops between steps and before each input, and saves
-    # ponytail: a first page load longer than SHUTDOWN_WAIT_SECONDS can leave its tab open;
-    # closing orphaned tabs at startup (design §10) is the upgrade if that happens.
+    STOP.set()  # this server's run stops between steps, before each input or repeated read and in a loading wait
+    # ponytail: a first page load, or a busy page's reads, longer than SHUTDOWN_WAIT_SECONDS can leave its tab open
+    # and the stop unsaved; closing orphaned tabs at startup (design §10) is the upgrade if that happens.
     IDLE.wait(SHUTDOWN_WAIT_SECONDS)
     close_browser()
     os._exit(0)  # a normal interpreter exit would wait forever on mcp's stdin reader thread

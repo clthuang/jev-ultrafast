@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import contextlib
 import json
 import subprocess
 import time
@@ -65,7 +66,8 @@ def choice(action="field"):
 
 
 def make_agent(monkeypatch, policy, *, allow_commit=False, trace_path=None):
-    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True))
+    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True),
+                   wait_for_loading=Mock(return_value=None), draining=contextlib.nullcontext, reset_loading=Mock())
     monkeypatch.setattr(loop, "Browser", Mock(return_value=browser))
     agent = loop.Agent("https://example.test/", "Find a book", allowed_operations=policy,
                        allow_commit=allow_commit, trace_path=trace_path)

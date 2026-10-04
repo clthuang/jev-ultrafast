@@ -1,5 +1,6 @@
 """Observed actions through Browser Harness; one CDP session, no per-step subprocess."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from browser_harness import _ipc as ipc
 from browser_harness.admin import NAME, daemon_browser_kind, ensure_daemon, restart_daemon
 from browser_harness.helpers import cdp
 
+from . import events
 from .contracts import RunStopped
 
 # Snapshot schema 2 (docs/robustness-efficiency/status.md §4.2): the page keeps the latest observation's exact
@@ -31,6 +34,11 @@ TOKEN_KEYS = frozenset({"schema", "epoch", "generation", "document_id"})
 # Protocol identity, never progress: excluded from fingerprint() wherever it is nested.
 PROTOCOL_KEYS = frozenset({"observation_token", "snapshot_schema", "snapshot_stats", "document_id", "cache_epoch"})
 OVERFLOW_COUNTS = ("limit", "characters", "candidates", "omitted_actions", "evidence", "text_characters")
+# Delegated decisions D7 and D8 (docs/executor-improvements.md §4): before a DONE or BLOCKED answer stands, wait
+# while a content request of recent inputs is in flight, or was seen to start or end in the last LOADING_QUIET_MS,
+# and stop polling LOADING_CAP_SECONDS after the last input. No minimum wait: where code sees no loading, Jev decides.
+LOADING_QUIET_MS, LOADING_CAP_SECONDS = 100, 5
+LOADING_TYPES = frozenset({"Document", "XHR", "Fetch", "Script"})  # the requests that bring content; not images, fonts
 # lsof lives in /usr/sbin on macOS, which a minimal PATH leaves out.
 LSOF = shutil.which("lsof", path="/usr/sbin:/usr/bin:/sbin:/bin")
 
@@ -105,6 +113,15 @@ def checked_cdp(method, *, session_id, check_stop=None, remaining_budget=None, *
 
 
 class Browser:
+    # The loading wait (docs/executor-improvements.md §4; docs/robustness-efficiency/status.md §4.3). Class defaults
+    # keep a Browser made without __init__, as tests make one, without a wait.
+    gate = None  # events.gate_mode(): None (no wait), "first input" or "setup"
+    network = False  # tracking started: this tab's own source is attached and its Network events acknowledged
+    events = None
+    tracking = None  # the lock between a read's drain and the drain thread's
+    loading = last_request = input_done = None
+    lost = False
+
     def __init__(self, url):
         # Bound the wait for Chrome's "Allow remote debugging?" answer instead of hanging silently.
         ensure_daemon(wait=30)
@@ -133,6 +150,8 @@ class Browser:
                 if self.evaluate("document.readyState") == "complete":
                     break
                 time.sleep(0.02)
+            self.gate = events.gate_mode(daemon_browser_kind())
+            self.prepare_loading()
         except Exception:
             # A failed setup must not leave an orphan background tab.
             self.close()
@@ -147,7 +166,8 @@ class Browser:
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
 
-    def observe(self, screenshot=True, *, check_stop=None, remaining_budget=None, max_attempts=10, settle_input=True):
+    def observe(self, screenshot=True, *, check_stop=None, remaining_budget=None, max_attempts=10, settle_input=True,
+                track=True):
         control = {"check_stop": check_stop, "remaining_budget": remaining_budget} if check_stop else {}
         if check_stop:
             check_stop()
@@ -186,7 +206,7 @@ class Browser:
                 pass
         for attempt in range(max_attempts):
             try:
-                return browser_operation(
+                page = browser_operation(
                     {"operation": "observe", "session": self.session, "screenshot": screenshot}, **control,
                 )
             except StalePage:
@@ -195,6 +215,10 @@ class Browser:
                 if check_stop:
                     check_stop()
                 time.sleep(min(0.02, remaining_budget()) if remaining_budget else 0.02)
+                continue
+            if track and self.network:  # D14: nothing is tracked before the first input
+                self._track()  # the settle's and the read's events, taken in before Jev answers
+            return page
         raise StalePage("Page did not settle")
 
     def fresh(self, page, action=None, **control):
@@ -215,14 +239,112 @@ class Browser:
         token = observation_token(page)
         if token is None:  # a legacy or malformed read: no browser call, nothing runs
             raise StalePage("This page read cannot be executed. Observe again.")
+        tracked = self.gate is not None and action["kind"] != "wait"  # D9: a WAIT runs nothing in the page
+        if tracked and not self.network:
+            # The first input: this tab's own source, its Network events acknowledged before the input runs. The start
+            # page's own requests belong to no input.
+            timeout = min(events.SETUP_SECONDS, remaining_budget()) if remaining_budget else events.SETUP_SECONDS
+            self.events, self.tracking = events.open_events(self.target, timeout), threading.Lock()
+            self.network, self.lost, self.loading, self.last_request = True, False, {}, None
+            if check_stop:
+                check_stop()
         if action["kind"] != "select" and not self.fresh(page, action, **control):
             raise StalePage("Page changed since this decision. Observe again.")
+        if tracked:
+            self._track()  # events so far belong to earlier inputs; this input's arrive after it
         if action["kind"] == "wait":
             time.sleep(min(0.1, remaining_budget()) if remaining_budget else 0.1)
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text,
                                     "token": token}, on_phase=on_phase, **control)
         self.after_input = action if action["kind"] != "wait" else None
+        if tracked:  # only an input that ran: one stopped before it keeps the last input's deadline
+            now = time.monotonic()
+            # D13: requests seen less than LOADING_CAP_SECONDS ago may still bring an earlier input's result. Before
+            # the first input that ran there is none, so the start page's own requests are never carried.
+            self.loading = {request: seen for request, seen in self.loading.items()
+                            if self.input_done is not None and now - seen < LOADING_CAP_SECONDS}
+            self.last_request, self.input_done = None, now
         return result
+
+    def _track(self):
+        """Take in this tab's Network events from its own source (D8): its content requests in flight, and when one
+        was last seen to start or end. A failed read is loss and raises; an event dropped from the full queue is loss,
+        never quiet."""
+        with self.tracking:
+            try:
+                batch, overflow = self.events.read()
+            except BaseException:
+                self.lost = True
+                raise
+            self.lost = self.lost or overflow
+            now = time.monotonic()
+            for method, request, kind, frame in batch:
+                if method == "Network.requestWillBeSent":
+                    # D8: a cross-site iframe's document ends on its own target, never here. A tab's target id is
+                    # also its main frame's id. A redirect reuses its request's entry.
+                    if kind in LOADING_TYPES and (kind != "Document" or frame == self.target):
+                        self.loading[request] = now
+                        self.last_request = now
+                elif self.loading.pop(request, None) is not None:  # loadingFinished or loadingFailed
+                    self.last_request = now
+
+    @contextlib.contextmanager
+    def draining(self):
+        """While Jev decides, take in this tab's events every 20 ms (D12), so its bounded queue cannot overflow."""
+        if not self.network:
+            yield  # no input yet, so nothing is tracked
+            return
+        done = threading.Event()
+
+        def drain():
+            while not done.wait(0.02):
+                try:
+                    self._track()
+                except Exception:  # _track() marked the loss; the main thread's next read reports a dead source
+                    return
+
+        thread = threading.Thread(target=drain, name="jev-drain", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join()
+
+    def wait_for_loading(self, *, check_stop=None, remaining_budget=None):
+        """Wait while this tab visibly loads what recent inputs started: [ms, capped, lost], or None (D9) with no
+        input yet or the last one LOADING_CAP_SECONDS old. Every poll checks the run's stop (D11). It reads no page,
+        so the observation the answer was made on stays the freshness baseline."""
+        if not self.network or self.input_done is None or time.monotonic() - self.input_done >= LOADING_CAP_SECONDS:
+            return None
+        started = time.monotonic()
+        while True:
+            self._track()
+            now = time.monotonic()
+            quiet = self.last_request is None or now - self.last_request >= LOADING_QUIET_MS / 1000
+            loaded = not self.loading and quiet
+            if loaded or now - self.input_done >= LOADING_CAP_SECONDS:
+                break
+            if check_stop:
+                check_stop()
+            time.sleep(min(0.02, remaining_budget()) if remaining_budget else 0.02)
+        waited = [round((now - started) * 1000), not loaded, self.lost]
+        self.lost = False  # D10: lost covers the reads since the last recorded wait
+        return waited
+
+    def prepare_loading(self):
+        """With your own Chrome opted in (gate "setup"), open the loading wait's one connection now, at setup, so its
+        "Allow remote debugging?" answer never counts against a run's budget. An open connection is reused."""
+        if self.gate == "setup":
+            events.shared_connection(events.APPROVAL_SECONDS)
+
+    def reset_loading(self):
+        """A new goal starts with nothing tracked: its first input attaches a fresh observer session."""
+        source, self.events = self.events, None
+        self.network, self.loading, self.last_request, self.input_done, self.lost = False, None, None, None, False
+        if source:
+            with contextlib.suppress(Exception):  # a closed connection has nothing left to detach
+                source.close()
 
     def close_popups(self):
         """Close tabs this tab opened, and return their URLs. The loop never follows a pop-up."""
@@ -240,6 +362,7 @@ class Browser:
         return True
 
     def close(self):
+        self.reset_loading()
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
             self.target = None

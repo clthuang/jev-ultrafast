@@ -74,7 +74,7 @@ def _manifest(tmp_path, status="ready"):
     root = tmp_path / "lab"
     root.mkdir()
     (root / ".jev-lab-owner").write_text("owned")
-    manifest = {"schema_version": 1, "status": status, "lab_id": "owned", "root": str(root),
+    manifest = {"schema_version": lab.SCHEMA_VERSION, "status": status, "lab_id": "owned", "root": str(root),
                 "source_root": str(lab.SOURCE_ROOT), "processes": {}}
     for key in ("profile", "runtime", "state", "fixtures"):
         (root / key).mkdir()
@@ -151,10 +151,11 @@ def test_manifest_rejects_mismatched_daemon_before_browser_use(tmp_path, monkeyp
     manifest.update(processes={"chrome": record, "daemon": {**record, "pid": 3457},
                                "fixtures": {**record, "pid": 3458}, "proxy": {**record, "pid": 3459}},
                     cdp_port=9876, cdp_ws="ws://127.0.0.1:9876/devtools/browser/id", fixture_port=9877,
-                    fixture_url="http://127.0.0.1:9877", proxy_port=9878)
+                    fixture_url="http://127.0.0.1:9877", frame_url=f"http://{lab.FRAME_HOST}:9877", proxy_port=9878)
     (Path(manifest["profile"]) / "DevToolsActivePort").write_text("9876\n/devtools/browser/id\n")
     (Path(manifest["root"]) / "proxy-ready.json").write_text(json.dumps(
-        {"lab_id": "owned", "port": 9878, "allowed_origin": manifest["fixture_url"]}))
+        {"lab_id": "owned", "port": 9878, "allowed_origin": manifest["fixture_url"],
+         "frame_origin": manifest["frame_url"]}))
     path.write_text(json.dumps(manifest))
     monkeypatch.setattr(lab, "verify_process", lambda _record: True)
     monkeypatch.setattr(lab, "_listener_owned", lambda *_: None)
@@ -223,6 +224,11 @@ def test_unregistered_child_is_stopped_and_reaped(tmp_path, monkeypatch, fault):
     ("GET", "http://example.invalid/private", {}),
     ("GET", "http://127.0.0.1:4569/private", {}),
     ("GET", "http://localhost:4568/private", {}),
+    ("GET", "http://jev-frame.test:4569/private", {}),  # the frame site only at the fixture's own port
+    ("GET", "http://jev-frame.test/private", {}),
+    ("GET", "https://jev-frame.test:4568/private", {}),
+    ("GET", "http://other.test:4568/private", {}),
+    ("GET", "http://sub.jev-frame.test:4568/private", {}),
     ("GET", "http://[::1]:4568/private", {}),
     ("GET", "http://127.0.0.1:4568@other.invalid/private", {}),
     ("GET", "http://127.0.0.1:4568/private", {"Upgrade": "websocket"}),
@@ -238,6 +244,12 @@ def test_proxy_denies_every_destination_except_exact_http_fixture(method, target
 def test_proxy_forwards_only_observed_fixture_path():
     assert lab.proxy_target("GET", "http://127.0.0.1:4568/allowed?a=1", {"Host": "127.0.0.1:4568"}, 4568) == (
         "/allowed?a=1", 0)
+    # The frame site is the same fixture server under a second name; its Host must name it, not the other origin.
+    assert lab.proxy_target("GET", "http://jev-frame.test:4568/frame", {"Host": "jev-frame.test:4568"}, 4568) == (
+        "/frame", 0)
+    for host in ("127.0.0.1:4568", "other.test:4568"):
+        with pytest.raises(lab.LabSafetyError):
+            lab.proxy_target("GET", "http://jev-frame.test:4568/frame", {"Host": host}, 4568)
 
 
 def test_cdp_cannot_override_owned_proxy():
@@ -256,10 +268,14 @@ def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest):
     audit_start = len(audit_path.read_text().splitlines()) if audit_path.exists() else 0
     browser = Browser(manifest["fixture_url"] + "/__egress__/page")
     forbidden = f"http://127.0.0.1:{manifest['canary_port']}"
-    expression = """(async forbidden => {
+    # The frame site is allowed, only at the fixture's port; localhost and other names stay denied.
+    frame, port = manifest["frame_url"], manifest["fixture_port"]
+    expression = """(async ([forbidden,frame,port]) => {
       const tasks=[];
       const attempt=url=>fetch(url,{mode:'no-cors'}).catch(()=>null);
       tasks.push(attempt(forbidden+'/fetch'),attempt(forbidden.replace('http:','https:')+'/https'));
+      tasks.push(attempt(frame+'/frame-allowed'),attempt('http://localhost:'+port+'/localhost'));
+      tasks.push(attempt('http://jev-frame.test:'+forbidden.split(':').pop()+'/frame-other-port'));
       tasks.push(attempt('/__egress__/redirect'));
       for(const tag of ['iframe','img']) {
         tasks.push(new Promise(resolve=>{const e=document.createElement(tag);e.onload=e.onerror=resolve;
@@ -282,7 +298,7 @@ def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest):
       if(popup)popup.close();
       return {completed:result,positive:await fetch('/__lab__').then(r=>r.json()),
         canary:await fetch('/__egress__/status').then(r=>r.json())};
-    })(""" + json.dumps(forbidden) + ")"
+    })(""" + json.dumps([forbidden, frame, port]) + ")"
     try:
         response = browser.call("Runtime.evaluate", expression=expression, awaitPromise=True, returnByValue=True,
                                 userGesture=True, _response_timeout=12)
@@ -293,8 +309,10 @@ def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest):
         assert result["canary"] == {"connections": 0, "canary_port": manifest["canary_port"]}
         audit = [json.loads(line) for line in audit_path.read_text().splitlines()[audit_start:]]
         denied = [item for item in audit if item["outcome"] == "denied"]
-        for suffix in ("fetch", "redirect", "iframe", "img", "popup", "worker", "shared", "service"):
+        for suffix in ("fetch", "redirect", "iframe", "img", "popup", "worker", "shared", "service", "localhost",
+                       "frame-other-port"):
             assert any(item["target"].endswith("/" + suffix) for item in denied), (suffix, denied)
+        assert any(item["outcome"] == "allowed" and item["target"] == frame + "/frame-allowed" for item in audit)
         # Chrome tunnels even unencrypted ws:// through CONNECT, so the proxy sees its authority, not its path.
         assert sum(item["method"] == "CONNECT" and item["target"] == f"127.0.0.1:{manifest['canary_port']}"
                    for item in denied) >= 2

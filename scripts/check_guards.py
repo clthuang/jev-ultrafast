@@ -1,6 +1,7 @@
 """Local-browser freshness/execution regressions. No model calls or external websites."""
 
 import argparse
+import html
 import os
 import time
 from urllib.parse import quote
@@ -19,6 +20,10 @@ HTML = """<!doctype html><title>Guard checks</title>
 DIALOG_AND_POPUP = """<!doctype html><title>Dialog and pop-up checks</title>
 <button onclick="window.answer=confirm('Sure?')">Confirm</button>
 <a href="about:blank" target="_blank">Open</a>"""
+
+# The fixture server holds this request for 1 s: a final answer given meanwhile waits for it (status.md §4.3).
+LOADING = """<!doctype html><title>Loading checks</title>
+<button data-url="%s" onclick="fetch(this.dataset.url,{mode:'no-cors'}).then(()=>{window.loaded=true})">Load</button>"""
 
 
 def main():
@@ -165,6 +170,23 @@ def main():
             assert time.monotonic() < deadline, "a closed pop-up stayed open"
             time.sleep(0.05)
         passed.append("pop-up tab closed and reported")
+
+        browser.close()
+        delayed = html.escape(manifest["fixture_url"] + "/delay?seconds=1")
+        browser = Browser("data:text/html," + quote(LOADING % delayed))
+        page = browser.observe(screenshot=False)
+        browser.act(next(a for a in page["actions"] if a["label"] == "Load"), page)
+        assert browser.events.session not in {None, browser.session}, "the loading wait needs its own session"
+        passed.append("the first input attaches the tab's own observer session")
+        deadline = time.monotonic() + 3
+        while not browser.loading:  # as the read after the input takes in its events
+            assert time.monotonic() < deadline, "the request was never seen"
+            browser._track()
+            time.sleep(0.02)
+        waited, capped, lost = browser.wait_for_loading()
+        assert waited >= 500 and not capped and not lost, (waited, capped, lost)
+        assert browser.evaluate("window.loaded") is True
+        passed.append("a final answer waits for the content its input requested")
     finally:
         browser.close()
     print("\n".join(passed))

@@ -1,7 +1,9 @@
 """Real DOM and event proofs in the separately owned, fixture-only native lab. Never call a model."""
 
+import http.client
 import json
 import re
+import secrets
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from jev_ultrafast import agent as loop
-from jev_ultrafast import browser, model
+from jev_ultrafast import browser, mcp_server, model
 from jev_ultrafast.contracts import RunStopped
 
 pytestmark = pytest.mark.native
@@ -396,6 +398,19 @@ def sample(instance, expression, end_to_end):
     return record
 
 
+def idle(instance):
+    """Wait, outside any timing, until a tab has finished its earlier script: a sample that timed out keeps running
+    in the page, and would slow the next sample in either tab."""
+    instance.call("Runtime.evaluate", expression="0", returnByValue=True, _response_timeout=60)
+
+
+def schema1_guards(instance):
+    """Schema 1's guard count on this page, read once without the 5 s limit a timed sample has."""
+    expression = f"(() => {{ const state={SCHEMA1}; return Object.keys(state.guards).length; }})()"
+    return instance.call("Runtime.evaluate", expression=expression, returnByValue=True,
+                         _response_timeout=60)["result"]["value"]
+
+
 def distribution(values):
     values = sorted(values)
     if not values:
@@ -427,9 +442,11 @@ def test_snapshot_payload_and_progress_contracts(tab_pair, lab_manifest, request
                 if schema == "schema 1":
                     rows.append({"schema": schema, "warmup": number < 3,
                                  **sample(first, SCHEMA1, lambda: first.evaluate(SCHEMA1))})
+                    idle(first)
                 else:
                     rows.append({"schema": schema, "warmup": number < 3,
                                  **sample(second, browser.READ_STATE, lambda: second.observe(screenshot=False))})
+                    idle(second)
         proof["samples"][n] = rows
         summary = {}
         for schema in ("schema 1", "schema 2"):
@@ -447,11 +464,13 @@ def test_snapshot_payload_and_progress_contracts(tab_pair, lab_manifest, request
                                   for item in pages}),
                 "references": sorted({item["references"] for item in pages}),
             }
+        summary["schema 1"]["guards_untimed"] = schema1_guards(first)
         proof["summary"][n] = summary
         candidate = summary["schema 2"]
         assert candidate["bytes"]["max"] <= browser.MAX_SNAPSHOT_BYTES and not candidate["end_to_end_errors"]
         assert candidate["scope_reads"] == [1] and candidate["guards"] == [250] and candidate["references"] == [250]
-        assert summary["schema 1"]["guards"] == [n]  # schema 1 built a guard for every candidate
+        # Schema 1 built a guard for every candidate; at 5,000 its timed samples can all outlast the 5 s read.
+        assert summary["schema 1"]["guards_untimed"] == n and set(summary["schema 1"]["guards"]) <= {n}
     # Ten controls per row and long multibyte labels: still below the ceiling, one read per offered row.
     load(second, f"{base}?n=1000&scope=row&pad=200")
     page = second.observe(screenshot=False)
@@ -476,3 +495,240 @@ def test_snapshot_payload_and_progress_contracts(tab_pair, lab_manifest, request
     proof["lone_surrogate_label"] = lone["label"].encode("utf-8", "surrogatepass").hex()
     assert second.act(lone, page) == {"executed": lone["id"]} and second.evaluate("window.clicks") == 1
     save_proof(lab_manifest, request, proof)
+
+
+# Page readiness (docs/robustness-efficiency/status.md §4.3): the loading wait on the tab's own event source and the
+# reread of a timed-out read after a step, in real Chromium. A scripted Jev; the fixture server and the page count
+# every input independently of the run's own record.
+BUSY_MS = 7000  # docs/executor-improvements.md H5: a synthetic page that stays busy past the 5 s read
+
+
+def submissions(manifest, key):
+    """The submissions the fixture server received for this key: evidence outside the browser and the run."""
+    connection = http.client.HTTPConnection("127.0.0.1", manifest["fixture_port"], timeout=5)
+    try:
+        connection.request("GET", f"/__lab__/count?key={key}")
+        return json.loads(connection.getresponse().read())["count"]
+    finally:
+        connection.close()
+
+
+def scripted_jev(monkeypatch, answers):
+    """choose() without a model: each answer is an observed button's label (a CLICK), DONE or BLOCKED."""
+    pending = list(answers)
+
+    def choose(page, goal, history, allowed_operations, *, check_stop, remaining_budget, on_response):
+        answer = pending.pop(0)
+        common = {"confidence": 1, "commit_probability": 0, "latency_ms": 1, "usage": {}, "model": "scripted"}
+        if answer in {"DONE", "BLOCKED"}:
+            return {"choice": answer, "operation": answer, "target": None, "probabilities": {answer: 1}, **common}
+        action = next(a for a in page["actions"] if a["kind"] == "click" and a["label"] == answer)
+        _, targets, _ = model.action_space(page["actions"])
+        head = next(key for key, value in targets["CLICK"].items() if value is action)
+        return {"choice": action["id"], "operation": "CLICK", "target": head, "probabilities": {action["id"]: 1},
+                **common}
+
+    monkeypatch.setattr(loop, "choose", choose)
+    monkeypatch.setattr(loop, "field_text", Mock(side_effect=AssertionError("no text is generated")))
+    return pending
+
+
+@pytest.fixture
+def server_run(lab_manifest, monkeypatch, tmp_path):
+    """mcp_server.start_run, the server's own loop and final read, in the lab with a scripted Jev. Returns the reply,
+    the saved run file and the page's own click counters; the tab is closed afterwards."""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    monkeypatch.setattr(mcp_server, "RUNS", runs)
+    monkeypatch.setattr(mcp_server, "notes_block", lambda _state: ("", []))
+    monkeypatch.setattr(mcp_server.anyio.from_thread, "check_cancelled", lambda: None)
+
+    def run(url, answers):
+        pending = scripted_jev(monkeypatch, answers)
+        text = mcp_server.start_run("Find the results", url, ["CLICK", "WAIT"], None, False)[0]
+        [saved] = runs.glob("*.json")  # one run per test
+        clicks = mcp_server.AGENT.browser.evaluate("window.clicks")
+        assert pending == []  # every scripted answer was asked for, and no more
+        return text, json.loads(saved.read_text()), clicks, mcp_server.AGENT
+
+    try:
+        yield run
+    finally:
+        mcp_server.close_browser()
+
+
+def readiness_url(manifest, key, **params):
+    query = "&".join(f"{name}={value}" for name, value in {"key": key, **params}.items())
+    return f"{manifest['fixture_url']}/readiness.html?{query}"
+
+
+def test_busy_page_and_loading_gate_compose_without_repeated_input(server_run, lab_manifest, request):
+    """READINESS-3 in real Chromium: a 7 s busy results page times out the read after the Search, which is read again
+    without repeating the input; then Jev answers DONE while the details it asked for still load, the wait sees them
+    arrive, the stale DONE is dropped and the one on the loaded page stands. The fixture server counts one submission,
+    the page one click per button, and the server's separately timed final read shows the details."""
+    key = "compose-" + secrets.token_hex(4)
+    text, run, clicks, agent = server_run(readiness_url(lab_manifest, key, busy=BUSY_MS),
+                                          ["Search", "Load details", "DONE", "DONE"])
+    assert run["status"] == "done" and run["stop_code"] is None and " · done · " in text
+    assert submissions(lab_manifest, key) == 1 and clicks == {"search": 1, "details": 1}
+    assert [step["action"] for step in run["history"]] == ["Search", "Load details"]
+    # The repeated read shows the Search's results; the details had not arrived when their click was read.
+    assert [step["page_changed"] for step in run["history"]] == [True, False]
+    assert run["repeated_reads"] == 1  # the Search's read timed out once and was read again
+    [loaded, settled] = run["loading_waits"]
+    assert 500 <= loaded[0] <= 3000 and loaded[1:] == [False, False]  # the DONE waited for the details request
+    assert settled[0] < 500 and settled[1:] == [False, False]
+    assert run["stale_recoveries"] == 1 and run["stale_decisions"] == 1  # the DONE made before they loaded
+    assert [decision["choice"] for decision in run["decisions"]][2:] == ["DONE", "DONE"]  # each asked once
+    assert run["final_read_fresh"] is True and run["final_read_ms"] >= 0
+    assert f"Details loaded for {key}" in run["page"]["text"]
+    source = agent.browser.events  # the wait followed the tab's own observer session, never the daemon's
+    assert source.session not in {None, agent.browser.session} and not source.connection.closed.is_set()
+    save_proof(lab_manifest, request, {key: run[key] for key in (
+        "status", "stop_code", "repeated_reads", "loading_waits", "stale_recoveries", "stale_decisions",
+        "final_read_ms", "final_read_fresh", "elapsed_ms")} | {"submissions": 1, "clicks": clicks})
+
+
+@pytest.mark.parametrize("trial", [1, 2, 3, 4, 5, "dialog"])
+def test_busy_page_reads_again_without_repeating_the_input(server_run, lab_manifest, request, trial):
+    """docs/executor-improvements.md §2's local acceptance (H5): on a page busy 7 s after the Search, five runs each
+    end done with the input once, one submission and one repeated read. A dialog opened after the input blocks every
+    read: two repeats, then the run stops with the dialog dismissed, the step recorded once and never repeated."""
+    key = f"busy-{trial}-" + secrets.token_hex(4)
+    if trial == "dialog":
+        text, run, clicks, _agent = server_run(readiness_url(lab_manifest, key), ["Alert"])
+        assert run["status"] == "stopped" and run["stop_code"] == "execution_error"
+        assert "the page showed a dialog; dismissed" in run["result"]["notes"]
+        assert run["repeated_reads"] == 2 and clicks == {"alert": 1}
+        assert len(run["history"]) == 1 and run["history"][0]["page_changed"] is None
+    else:
+        text, run, clicks, _agent = server_run(readiness_url(lab_manifest, key, busy=BUSY_MS), ["Search", "DONE"])
+        assert run["status"] == "done" and run["repeated_reads"] == 1
+        assert submissions(lab_manifest, key) == 1 and clicks == {"search": 1}
+        assert len(run["history"]) == 1 and run["history"][0]["page_changed"] is True
+        assert f"Results for {key}" in run["page"]["text"]
+    save_proof(lab_manifest, request, {"trial": trial, "status": run["status"], "stop_code": run["stop_code"],
+                                       "repeated_reads": run["repeated_reads"], "clicks": clicks,
+                                       "notes": run["result"]["notes"], "elapsed_ms": run["elapsed_ms"]})
+
+
+def press(tab, label):
+    page = tab.observe(screenshot=False)
+    tab.act(next(a for a in page["actions"] if a["kind"] == "click" and a["label"] == label), page)
+
+
+def until(condition, seconds=3):
+    deadline = time.monotonic() + seconds
+    while not (result := condition()):
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.02)
+    return result
+
+
+@pytest.fixture
+def readiness_tab(lab_manifest):
+    """A real Browser on the readiness fixture; every event its own source hands over is kept, with its time."""
+    opened = []
+
+    def open_tab():
+        tab = browser.Browser(readiness_url(lab_manifest, "gate-" + secrets.token_hex(4),
+                                            frame=lab_manifest["frame_url"]))
+        opened.append(tab)
+        tab.seen = []
+        return tab
+
+    def watch(tab):
+        source, real = tab.events, tab.events.read
+
+        def read():
+            batch, overflow = real()
+            tab.seen.extend(batch)
+            return batch, overflow
+
+        source.read = read
+
+    open_tab.watch = watch
+    try:
+        yield open_tab
+    finally:
+        for tab in opened:
+            tab.close()
+
+
+def tracked(tab, kind="Fetch"):
+    """Drain as a read does until a request of this kind is in flight, as it is when Jev answers after a read."""
+    def seen():
+        tab._track()
+        return any(event[2] == kind and event[0] == "Network.requestWillBeSent" and event[1] in tab.loading
+                   for event in tab.seen)
+
+    return until(seen)
+
+
+def status_text(tab):
+    return tab.evaluate("document.querySelector('#status').textContent")
+
+
+def test_loading_gate_follows_this_tabs_content_requests(readiness_tab, lab_manifest, request):
+    """docs/executor-improvements.md §4's local acceptance on the tab's own event source: an answer before the
+    request does not wait; one while it loads waits until the page shows it, uncapped; a request that never ends
+    caps 5 s after the input; a cross-site iframe's document (a real separate target) does not hold the wait; a
+    main-frame navigation does; a scroll during an earlier request keeps it. Each checked against the page itself."""
+    proof = {}
+    tab = readiness_tab()
+    press(tab, "Start later")  # the first input opens the tab's own source, Network acknowledged before it ran
+    assert tab.events.session not in {None, tab.session} and tab.network
+    readiness_tab.watch(tab)
+    proof["before the request"] = tab.wait_for_loading()
+    assert proof["before the request"] == [0, False, False]  # no minimum wait: nothing was loading yet
+    until(lambda: status_text(tab) == "Later loaded")  # its request did follow, after the answer
+
+    tab = readiness_tab()
+    press(tab, "Slow request")
+    readiness_tab.watch(tab)
+    tracked(tab)
+    proof["while it loads"] = waited = tab.wait_for_loading()
+    assert 800 <= waited[0] <= 2500 and waited[1:] == [False, False] and status_text(tab) == "Slow loaded"
+
+    tab = readiness_tab()
+    press(tab, "Poll forever")
+    readiness_tab.watch(tab)
+    tracked(tab)
+    proof["never ends"] = waited = tab.wait_for_loading()
+    assert waited[1] is True and time.monotonic() - tab.input_done >= browser.LOADING_CAP_SECONDS
+    assert status_text(tab) == "Ready"  # capped, not loaded
+
+    tab = readiness_tab()
+    press(tab, "Open frame")
+    readiness_tab.watch(tab)
+    frames = until(lambda: [t for t in browser.cdp("Target.getTargets")["targetInfos"] if t["type"] == "iframe"
+                            and t.get("parentFrameId") == tab.target], seconds=5)
+    assert frames[0]["url"].startswith(lab_manifest["frame_url"])  # a real out-of-process iframe target
+    until(lambda: tab._track() or any(event[2] == "Document" for event in tab.seen))
+    [document] = [event for event in tab.seen if event[2] == "Document"]
+    assert document[3] == frames[0]["targetId"] != tab.target  # seen here, as the iframe's own frame
+    proof["cross-site iframe"] = waited = tab.wait_for_loading()
+    assert waited[0] < 300 and waited[1:] == [False, False] and not tab.loading
+
+    tab = readiness_tab()
+    press(tab, "Navigate")
+    readiness_tab.watch(tab)
+    tracked(tab, "Document")
+    [navigation] = [event for event in tab.seen if event[2] == "Document"]
+    assert navigation[3] == tab.target  # the main frame's id is the tab's target id
+    proof["main-frame navigation"] = waited = tab.wait_for_loading()
+    assert 400 <= waited[0] <= 2500 and waited[1:] == [False, False]
+    assert until(lambda: tab.evaluate("location.pathname") == "/delay")
+
+    tab = readiness_tab()
+    press(tab, "Slow request")
+    readiness_tab.watch(tab)
+    tracked(tab)
+    time.sleep(0.3)
+    page = tab.observe(screenshot=False)
+    tab.act(next(a for a in page["actions"] if a["kind"] == "scroll"), page)  # another input, during the request
+    proof["scroll during an earlier request"] = waited = tab.wait_for_loading()
+    assert 500 <= waited[0] <= 2000 and waited[1:] == [False, False] and status_text(tab) == "Slow loaded"
+    save_proof(lab_manifest, request, proof)
+

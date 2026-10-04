@@ -18,6 +18,7 @@ from .contracts import (
     validate_allowed_operations,
     validate_goal,
 )
+from .events import EventConnectionLost
 from .model import action_space, choose, field_context, field_text
 from .questions import COMMIT_THRESHOLD, MAX_STEPS
 
@@ -25,6 +26,9 @@ from .questions import COMMIT_THRESHOLD, MAX_STEPS
 # no visible progress between them, return the run to Claude, which decides what follows. Jev's WAIT is its "still
 # loading" answer. Visible progress is a read that differs from the one before, or a re-read that fails.
 WAITS_BEFORE_CLAUDE = 2
+# Delegated decision D1 (docs/executor-improvements.md §2): after an executed step, a read that times out is repeated
+# at most this many times, each adding up to 5 s. H5's test needed one repeat.
+READ_TIMEOUT_REPEATS = 2
 EXECUTION_SECONDS = 90
 MAX_STALE_RECOVERIES = 120
 
@@ -42,7 +46,8 @@ class Agent:
         setup_started = time.monotonic()
         self.pending_text = None
         self.trace_path = trace_path
-        self.before_input = None  # optional stop check before each text call and input; raising skips them
+        # optional stop check before text calls, inputs and read repeats, and during a loading wait; raising stops them
+        self.before_input = None
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -62,6 +67,11 @@ class Agent:
         policy = validate_allowed_operations(allowed_operations)
         task = validate_goal(goal)
         setup_started = time.monotonic()
+        # A valid goal starts with nothing tracked: no earlier goal's loading holds its answers (status.md §4.3, the
+        # replacement of the historical case 25). An invalid one changed nothing above. A closed approval connection
+        # reopens here, before the goal's budget starts.
+        self.browser.reset_loading()
+        self.browser.prepare_loading()
         try:
             page = self.browser.observe(screenshot=self.screenshots)
         except SnapshotTooLarge as error:
@@ -113,6 +123,8 @@ class Agent:
             setup_ms=0,
             record=bool(self.record_dir),
             wait_streak=0,  # unchanged WAIT steps since the last visible progress; decision D16
+            repeated_reads=0,  # reads repeated after a timeout; decision D5, docs/executor-improvements.md §2
+            loading_waits=[],  # [ms, capped, lost] per loading wait; decision D10, docs/executor-improvements.md §4
         )
 
     def snapshot(self):
@@ -256,12 +268,13 @@ class Agent:
         except asyncio.CancelledError:
             self.mark_stopped("cancelled")
             raise
-        except SnapshotTooLarge as error:
+        except (SnapshotTooLarge, EventConnectionLost) as error:
             # Terminal at every read: no stale page to fall back on, no recovery read, no pending decision or text.
-            # A step that already ran stays recorded, with no page read after it.
+            # A step that already ran stays recorded, with no page read after it. A dead event source is never quiet.
             if self.state["status"] not in TERMINAL_STATES:
-                self.state["snapshot_overflow"] = error.details
-                self.mark_stopped("snapshot_too_large")
+                if isinstance(error, SnapshotTooLarge):
+                    self.state["snapshot_overflow"] = error.details
+                self.mark_stopped(error.code)
             raise
         except Exception as error:
             if (not isinstance(error, StalePage) and self.state["status"] not in TERMINAL_STATES
@@ -329,9 +342,11 @@ class Agent:
                 state["status"] = "blocked"
                 raise ValueError("Reached the demo's model-call budget")
             try:
-                state["decision"] = self.model_call(
-                    choose, state["page"], state["goal"], state["history"], self.allowed_operations,
-                )
+                # Decision D12 (docs/executor-improvements.md §4): the browser takes in its events while Jev decides.
+                with state["browser"].draining():
+                    state["decision"] = self.model_call(
+                        choose, state["page"], state["goal"], state["history"], self.allowed_operations,
+                    )
             except InvalidDecision as error:
                 state["operation_refusal"] = error.diagnostic
                 self.stop("operation_not_allowed", str(error))
@@ -348,6 +363,15 @@ class Agent:
             if selected in {"DONE", "BLOCKED"}:
                 if decision.get("operation") != selected or decision.get("target") is not None:
                     self.refuse_operation("The terminal choice does not match its operation.", decision, selected)
+                # Decision D6 (docs/executor-improvements.md §4): an answer given while the page still loads what recent
+                # inputs started waits for it; the freshness check below then makes it stale if the page changed. The
+                # wait reads no page, and a stop pending before, during or after it wins over the answer.
+                self.check_stop()
+                waited = state["browser"].wait_for_loading(check_stop=self.check_stop,
+                                                           remaining_budget=self.remaining_budget)
+                if waited is not None:  # D10: a zero wait still records its lost flag
+                    state["loading_waits"].append(waited)
+                self.check_stop()
                 if not self.browser_read(state["browser"].fresh, page):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
@@ -456,8 +480,19 @@ class Agent:
             state["attempt"] = None
             state["stale_streak"] = 0  # a step ran
             self.save()
-            self.check_stop()
-            state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
+            # A heavy page load can outlast one read's 5 s wait. The step ran and is saved: repeat only the read, never
+            # the input. Decision D4 (docs/executor-improvements.md §2): this covers every executed step, wait and
+            # scroll too. A repeat counts once it starts, after the run's stop check; no repeat moves the last input.
+            for repeat in range(READ_TIMEOUT_REPEATS + 1):
+                if repeat:
+                    self.check_stop()
+                    state["repeated_reads"] += 1
+                try:
+                    state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
+                    break
+                except TimeoutError:
+                    if repeat == READ_TIMEOUT_REPEATS:
+                        raise  # out of repeats: stop as before; run_goal then dismisses any dialog
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],

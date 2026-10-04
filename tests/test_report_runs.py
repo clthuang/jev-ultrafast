@@ -88,7 +88,9 @@ def flights_page(destination):
 
 
 def test_report_counts_false_and_missed_done(tmp_path, capsys):
-    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)])
+    # Run 1 has the readiness counters; the others, as run files from before them, have none.
+    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)], repeated_reads=2,
+              loading_waits=[[748, False, False], [5000, True, True]])
     write_run(tmp_path, 2, "blocked", [("claude", True)])
     risky = {**DECISION, "confidence": 0.3, "commit_probability": 0.7}
     write_run(tmp_path, 3, "done", [("user", True), ("claude", False)], decisions=[risky])
@@ -108,6 +110,10 @@ def test_report_counts_false_and_missed_done(tmp_path, capsys):
         "pass by lowest confidence <0.5 1/1 (100%), 0.5-0.8 2/3 (67%), >=0.8 0/0",
         "CLICK/SELECT by commit_probability <0.2 4, 0.2-0.5 0, >=0.5 1",
         "site changes 1",
+        "repeated reads 2",
+        "loading wait ms 5748",
+        "loading caps 1",
+        "loading event losses 1",
     ]:
         assert expected in everything
 

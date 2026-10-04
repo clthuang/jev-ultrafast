@@ -17,7 +17,7 @@ changed, as §2 and §3 record.
 | Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
 | Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
 | Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Done, 2026-10-04 | Cloud, `0e48727`: 10 named nodes / 52 variants with `--native`, 714 offline tests, 31 browser-native tests plus the egress proof, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only, then READY (60 of 62 mutants caught, 2 equivalent) (§4.2) |
-| Readiness | READINESS-1…3, GATE-READINESS | In progress | §4.3 |
+| Readiness | READINESS-1…3, GATE-READINESS | Implemented; gate review pending | Cloud: 45 named nodes / 48 variants with `--native` (`plan_tests.py READINESS`), 40 native tests, `check_guards.py` 25 checks; the case-by-case record in `readiness-test-map.md` (§4.3) |
 | Release | RELEASE-1…3, GATE-RELEASE | Not started | — |
 
 Re-run in the cloud on 2026-10-04 at `a94014b` (main after consolidation): every plan-named node through REVIEWS-7
@@ -237,45 +237,70 @@ Implements `docs/executor-improvements.md` §4 v4.2 (wait for loading before a f
 that times out after a step) against the current interfaces, not the historical diff (its `wait_for_loading(stop=…)`
 skips the 90 s deadline and its signatures predate POLICY/LIMITS).
 
-**Owned event source.** Browser Harness 0.1.13 keeps one 500-event queue per daemon, and `drain_events` empties it for
-every client, so the gate never uses the daemon's events and never sends `Network.enable` through the daemon's
-session. Instead `OwnedEvents` opens a private CDP WebSocket (a `cdp_use` client with no URL logging and no
-environment proxy for loopback), verifies the exact target with `Target.getTargetInfo`, attaches a separate observer
-session to it, registers `requestWillBeSent`/`loadingFinished`/`loadingFailed`, and acknowledges `Network.enable` on
-that session before the first input runs. Every await is bounded by `min(5, remaining budget)`; a bounded, drop-oldest
-queue records overflow as loss; a closed receiver is loss, never quiet; a failure stops the run with
-`event_connection_lost` and a sanitized message (no endpoint, ever, in messages, logs or run files).
+**Owned event source** (`jev_ultrafast/events.py`). Browser Harness 0.1.13 keeps one 500-event queue per daemon, and
+`drain_events` empties it for every client, so the wait never uses the daemon's events and never sends
+`Network.enable` through the daemon's session. `Connection` is a private DevTools WebSocket (`websockets`' sync client,
+no proxy for this loopback endpoint, bounded calls) whose reader thread routes replies to their callers and the three
+Network events by session. `OwnedEvents` verifies the exact target with `Target.getTargetInfo` (a page, never a
+replacement or a frame), attaches its own observer session, and has `Network.enable` acknowledged on it before the
+first input runs; a failed setup detaches. It keeps four fields per event (method, request ID, type, frame; never a
+URL, header or body) in a 500-event queue whose drop is recorded as loss. A closed connection fails every caller and
+read: the run stops with `event_connection_lost`, never reads as quiet, and never reconnects inside a run. No endpoint
+appears in any message, log or run file. One connection per server process serves every tab and goal.
 
-**Browser and Agent.** The first non-WAIT input starts tracking; only inputs that returned normally move the
-last-input time. Reads consume events (a 20 ms drain thread runs while Jev decides). Every DONE or BLOCKED answer,
-under any operation policy, waits while a tracked content request of this tab is in flight or ended within 100 ms, until
-5 s after the last input — no minimum wait, every poll checks the shared deadline and cancellation, and the wait
-records `[ms, capped, lost]` in `loading_waits`. The gate and the drain never evaluate the snapshot (an observe would
-advance the schema-2 generation and make every gated DONE stale). After an executed step — WAIT and scroll included —
-an observation `TimeoutError` is re-read at most twice (`repeated_reads`), each repeat checked against the stop first
-and counted only once started; nothing else is retried, and no repeat moves the last-input time. A valid new goal
-resets tracking after both validations; an invalid policy changes nothing. The two-WAIT handoff is unchanged: WAIT is
-not an input and starts no tracking.
+**Browser and Agent.** The first non-WAIT input attaches the source; only inputs that returned normally move the
+last-input time, and requests seen less than 5 s before an input are carried across it (D13). Reads take in the
+source's events, and a 20 ms drain thread runs while Jev decides. Every DONE or BLOCKED answer, under any operation
+policy, waits while a tracked content request of this tab (a main-frame document, fetch, XHR or script) is in flight
+or started or ended in the last 100 ms, until 5 s after the last input: no minimum wait, every poll checks the shared
+deadline and cancellation, and each recorded wait is `[ms, capped, lost]` in `loading_waits`. The wait and the drain
+never evaluate the snapshot (an observe would advance the schema-2 generation and make every gated DONE stale), and the
+server's final read takes in no events. After an executed step, WAIT and scroll included, an observation
+`TimeoutError` is read again at most twice (`repeated_reads`), each repeat checked against the stop first and counted
+only once started; nothing else is retried, and no repeat moves the last-input time. A valid new goal resets tracking
+after both validations; an invalid policy changes nothing. The two-WAIT handoff is unchanged: WAIT is not an input.
 
 **Decision needed (Chrome's per-connection approval).** The owned source is a second DevTools client. With an explicit
 endpoint (`BU_CDP_WS`/`BU_CDP_URL`, daemon kind `cdp`, as in the lab) that costs nothing. With your own Chrome (daemon
 kind `local`), Chrome 144+ asks "Allow remote debugging?" for every new connection, so a connection per goal would prompt
 at the first input of every run, inside its 90 s budget. Options: (a) one owned connection per server process, opened at
 browser setup and reused by every goal (one extra approval per `jev-mcp` start); (b) the gate only for explicit
-endpoints, with today's behaviour on `local`. Never fall back to the daemon's destructive drain. **Default until you
-choose: (b), with (a) available behind `JEV_LOADING_GATE=1`.**
+endpoints, with today's behaviour on `local`. Never fall back to the daemon's destructive drain. **Built default until
+you choose: (b), with (a) behind `JEV_LOADING_GATE=1`** (`events.gate_mode`); `JEV_LOADING_GATE=0` turns the wait off
+everywhere. Under (a) the connection opens at browser setup, or at a new goal's setup if it closed, bounded at 30 s like
+the daemon's approval, so the question never counts against a run. Chrome's approval prompt itself cannot be exercised
+in the cloud (headless Chromium with a debugging port asks nothing); it needs one check on your Mac.
 
-**Tests.** `tests/test_readiness_contracts.py` holds the 30 ported inherited cases and the 10 plan-named ones, using a
-real `Browser` on a fake CDP with a `FakeEvents` source, a shared fake clock, and — for composition cases — the actual
-schema-2 snapshot adapter; four inherited nodes live in `test_agent.py`, `test_mcp_server.py` and `test_report_runs.py`.
-Superseded historical cases are replaced, not deleted: case 25's carry-over becomes a reset, case 26's late DONE becomes
-a stopped run, case 12's daemon error becomes `event_connection_lost`, and other sessions' event pressure becomes the
-tab's own. Real `OwnedEvents` is tested against a patched WebSocket (wrong target, distinct sessions, enable ordering,
-saturation, setup timeout cleanup, disconnect, close/join, no URL in errors or logs). The native composition test runs
-`run_goal` with a scripted `choose` against fixture pages with server-side submit counters (busy page, alert, the six
-§4 acceptance lines), and the OOPIF case uses an opt-in second fixture origin (`localhost` alias) in the lab, with the
-egress denial probes rerun and a real iframe target asserted first. New run-file fields (`loading_waits`,
-`repeated_reads`) are totalled by `report_runs`; result text for Claude is unchanged.
+**Tests.** `tests/test_readiness_contracts.py`: a real `Browser` on a fake CDP with a `FakeEvents` source of the tab's
+own and a shared fake clock; the composition cases add the actual schema-2 snapshot adapter in Node. It holds §2.5's
+cases 1, 2, 4 and 5, §4.6's 27 cases (12, 25 and 26 replaced as the map specifies) and the plan's composition nodes;
+four inherited nodes live in `test_agent.py`, `test_mcp_server.py` and `test_report_runs.py`. The real `Connection` and
+`OwnedEvents` run against a scripted DevTools socket whose calls are checked against the installed `websockets`
+signature: a wrong target or a frame target, distinct observer sessions, enable before any input, another session's
+600 events neither delivered nor counted, exactly 500 events no loss and the 501st loss, setup timeout and close during
+setup (cleaned up at once), a disconnect with nothing pending, one connection reopened once after it closed, and no
+endpoint in errors or logs. The case-to-node record is in [readiness-test-map.md](readiness-test-map.md#implementation-record).
+Each of 48 code mutants (gate rules, carry-over, loss, stop checks, ordering, setup and approval bounds, event
+routing, the server's final read) fails at least one of these tests.
+
+**Native, in the owned lab** (`tests/test_browser_native.py`, fixture `readiness.html`): the plan's
+`test_busy_page_and_loading_gate_compose_without_repeated_input` drives `mcp_server.start_run` with a scripted Jev
+over a page busy 7 s after its Search, then a details request: done, `repeated_reads` 1, loading waits
+`[870, False, False]` and `[0, False, False]`, one stale DONE dropped and recovered, the separately timed final read
+(48 ms) shows the details, the fixture server counts one submission and the page one click per button. §2's
+acceptance: 5 of 5 busy-page runs done with one repeated read, one submission and one click each (about 7.05 s); the
+dialog run stops after two repeats with the dialog dismissed and its one step recorded. §4's acceptance on real
+Network events: an answer before the request waits 0 ms; one while it loads waits until the page shows it (1,600 ms,
+uncapped); a request that never ends caps 5 s after the input (4,980 ms); a cross-site iframe, a real separate
+out-of-process target whose document request arrives as the iframe's own frame, does not hold the wait (0 ms); a
+main-frame navigation, whose document carries the tab's target ID, does (1,163 ms); a scroll during an earlier request
+keeps it (1,276 ms). The iframe uses a second fixture site, `jev-frame.test` at the fixture's port, which the proxy
+forwards to the same owned server and nothing resolves; `localhost`, other ports and other names stay denied, and the
+egress proof (canary 0 connections) passes with it. `scripts/check_guards.py` adds two live lines (25 checks).
+
+New run-file fields (`loading_waits`, `repeated_reads`) are totalled by `report_runs`; result text for Claude is
+unchanged. Not performed: §4.6's live-site acceptance (H8c's gate arm on Google Flights, DuckDuckGo, crates.io and
+YouTube) and H5's arXiv repeats, which need live sites and paid models; they remain validation limits, not claims.
 
 ### 4.4 RELEASE
 

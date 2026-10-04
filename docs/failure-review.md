@@ -37,7 +37,8 @@
   - **The integration design** (`docs/claude-code-integration.md` §7.5, "Improve"): this design replaces its item 4,
     review on request, and extends item 1, prompt changes. Its items 2, 3 and 5 stay as they are.
   - **The executor design** (`docs/executor-improvements.md`): its repeated read after a busy step (its §2) and its wait
-    for visible loading before DONE (its §4) are the generic fixes this design relies on. They should ship first.
+    for visible loading before DONE (its §4) are the generic fixes this design relies on. Both are built (2026-10-04);
+    the wait is on with an explicit browser endpoint or `JEV_LOADING_GATE=1`.
 
 ## The short version
 
@@ -144,8 +145,8 @@ and only a verdict showed the missed DONE had succeeded.
 | Suggestion list, 1Password menu | one field per goal; the stale-streak stop caps the cost | no: 1Password belongs to the browser profile, and the rest was the goal |
 | Controls below the view | a scroll-only goal | untested. A scroll rule for Jev passed 2 of 6 live trials, and listing off-screen controls 0 of 6 (`docs/executor-improvements.md` §1, H1); on arXiv, BLOCKED won even with the dates on screen. No trial tried a taller view there. The note costs one extra goal; a trial needs the runner in §8.3 |
 | Search box in a shadow DOM | the results URL | no: Jev cannot read it on any site |
-| Results that load late | the executor design's loading wait (not built) | no: it is generic. With a 500 ms minimum and a simulated Jev, it passed on five sites; without the minimum, 10 of 10 on four of them |
-| A busy page after a step | the executor design's repeated read (not built) | no: it is generic |
+| Results that load late | the executor design's loading wait (built; on with an explicit endpoint or `JEV_LOADING_GATE=1`) | no: it is generic. With a 500 ms minimum and a simulated Jev, it passed on five sites; without the minimum, 10 of 10 on four of them |
+| A busy page after a step | the executor design's repeated read (built) | no: it is generic |
 | YouTube's changing results (lab only; no recorded run) | the same loading wait: 7 of 10 at the usual 780 px, and a pass in a 1600 px view | probably not: the failing layouts did not come back at 1600 px, so that trial "would probably have passed at 780 px" too |
 
 ## 2. The mechanism
@@ -211,7 +212,7 @@ next-step sentence (§5).
 | --- | --- | --- |
 | `covered_target` | the stale-streak stop, whose note contains "Target is covered by <…>" | 1: the re-test on ClinicalTrials.gov, naming `<mat-option>` |
 | `jev_blocked` | the "Jev answered BLOCKED" stop | 6 |
-| `busy_after_step` | a timeout, with the last step's `page_changed` still None, because the read after it failed | 1 |
+| `busy_after_step` | a timeout, with the last step's `page_changed` still None, because the read after it failed, repeats included | 1 |
 | `still_loading` | the "Jev judged the page still loading" stop: two WAIT steps, each leaving the page unchanged, with no change between them (`docs/executor-improvements.md` §5) | 0: added on 2026-09-29 |
 
 **The rest of the 15:**
@@ -311,7 +312,7 @@ The recorded recoveries give four notes, stored when the design is built and dat
 - **The MDN URL:** the recovered run's starting URL, with its query value removed.
 - **Left out:**
   - httpbin.org's 1Password menu, which belongs to your browser profile. The `covered_target` sentence covers it;
-  - the early DONEs, whose fix would be the executor design's loading wait (not built), and which did not come back on
+  - the early DONEs, whose fix is the executor design's loading wait (built since, where it is on), and which did not come back on
     Google Flights.
 
 ### 6.3 Who writes notes

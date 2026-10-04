@@ -1,6 +1,10 @@
 # Executor improvements from the Phase 10 comparison
 
-**Status:** §5 is built; §2 and §4 are designed and planned, not built.
+**Status:** §2, §4 and §5 are built. §2 and §4 were built on 2026-10-04 (`docs/robustness-efficiency/status.md`
+§4.3): §4 follows the tab's own Network events on a connection of the server's own instead of the daemon's shared
+buffer, and is on with an explicit browser endpoint or `JEV_LOADING_GATE=1`. Their offline cases, the synthetic
+busy-page trials and §4's local acceptance pass in an owned headless Chromium; §4.6's live-site acceptance (H8c's gate
+arm on four sites) has not been re-run on the built code.
 
 - **Round 1** (§1, §2): seven hypotheses, registered on 2026-09-24 at 12:52, before any experiment ran. All ran
   12:55–13:25 the same day.
