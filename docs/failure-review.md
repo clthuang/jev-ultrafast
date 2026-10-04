@@ -450,8 +450,18 @@ titles, labels and stop notes are page text.
 ### 7.3 On request
 
 "Review Jev runs": Claude in your session runs `review_runs.py queue`, reviews the summaries itself, and passes its
-decisions to `review_runs.py apply`. That is today's review on request with code's checks added, and it sends less
-than today's version, which reads whole run files.
+decisions to `review_runs.py apply --batch <id>`, naming the batch that `queue` printed. That is today's review on
+request with code's checks added, and it sends less than today's version, which reads whole run files.
+
+**Batches (2026-10-04, robustness plan REVIEWS-1…7).** `queue` saves an immutable batch: at most 25 runs, 5 notes and
+65,536 bytes, oldest whole items first. It prints each item sent and each item deferred, with its reason, so a backlog
+drains over several batches and an item too large for any batch is shown for a manual look instead of silently
+waiting. Only a committed batch acknowledges exactly the item versions it sent; a later correction queues the run
+again. Automatic reviews still consider only runs from `BUILD_DATE` on (`AUTO_FROM`), and their cadence, $0.50 cap,
+15-minute limit and three-failure rule are unchanged. If a committed review's digest cannot be published, its receipt
+in the notes file keeps the decisions and new work waits: `review_runs.py recover` publishes it. If a paid review's
+process cannot be verified, dispatch stops rather than risk a second paid run; once no review runs,
+`review_runs.py resolve <attempt ID>`, confirmed at a terminal, settles it once.
 
 ### 7.4 Automatic (on)
 

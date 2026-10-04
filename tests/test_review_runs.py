@@ -557,8 +557,13 @@ def test_auto_launch_is_pinned(launches, monkeypatch, tmp_path, capsys):
     for command in (["auto"], ["once", "--since", review_runs.AUTO_FROM]):
         assert review_runs.main(command) == 0
         shutil.rmtree(review_runs.REVIEWS)  # no stamp and no digest, so the next command launches too
+    capsys.readouterr()
     assert review_runs.main(["preflight"]) == 0
     assert digests() == [] and "next_due" not in site_notes.read_review_state()  # no scheduling stamp
+    # Phase 8's checks (docs/failure-review-plan.md 8.1), before the attempt's own line.
+    assert capsys.readouterr().out.splitlines()[:4] == [
+        "login check: ok", "schema check: ok, from structured output", "tools: StructuredOutput", "MCP servers: none",
+    ]
     claude = str((tmp_path / "bin" / "claude").resolve())
     auto, once, preflight = launches.calls
     for call, budget in ((auto, "0.5"), (once, "0.5"), (preflight, "0.05")):
@@ -754,9 +759,12 @@ def test_a_failure_never_quotes_a_task_value(case, capsys):
     else:
         text = review_runs.result_failure({'subtype': CANARY, 'result': CANARY}, quote_value)
         assert text == 'the review ended with <value>: <value>'
-    failure_path = review_runs.write_digest(datetime.now(), {'failure': text})
+    # A failed paid review records its failure in its attempt file, the surface that persists it.
+    attempt = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    attempt.update(status='failed', error=text, child={'exited': True})
+    review_runs.save_attempt(attempt)
     print(text)
-    assert CANARY not in failure_path.read_text() + capsys.readouterr().out
+    assert CANARY not in review_runs.attempt_path(attempt['attempt_id']).read_text() + capsys.readouterr().out
 
 
 def test_overlapping_task_values_are_replaced_together():

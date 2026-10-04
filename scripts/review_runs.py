@@ -735,10 +735,6 @@ def apply_decision_to(notes, decision, queue):
     return "retired"
 
 
-def apply_decision(decision, queue):
-    return site_notes.update(lambda notes: apply_decision_to(notes, decision, queue))
-
-
 def committed_path(batch_id):
     return REVIEWS / f"{batch_id}.json"
 
@@ -862,23 +858,6 @@ def record_review(reply, batch, sent=None, started=None, cost=None, attempt_id=N
         return _apply_batch(load_batch(batch["batch_id"]), reply, cost, attempt_id)
 
 
-def queue_record(queue):
-    """The digest's queue: the queued run IDs, and each queued note's ID with the hash of its content then."""
-    return {"runs": list(queue["runs"]), "notes": {key: note_hash(note) for key, note in queue["notes"].items()}}
-
-
-def write_digest(started, digest):
-    """Writes a review's digest, named by its start, replacing the file atomically; returns its path."""
-    # ponytail: two reviews started in the same second would share a digest name; the lock and a launch's seconds make
-    # that unlikely; add a suffix if it ever happens.
-    path = REVIEWS / f"{started:%Y%m%d-%H%M%S}.json"
-    REVIEWS.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(digest, indent=2) + "\n")
-    os.replace(temporary, path)
-    return path
-
-
 def take_lock(wait=0):
     """The reviews' lock, held until it is closed or the process exits; None while another process holds it for longer
     than wait seconds."""
@@ -916,27 +895,6 @@ def settle_legacy_running(state):
 
 # Delegated decision P15 (docs/failure-review-plan.md): this script writes next_due and off into state.json, and
 # site_notes.py owns reading it.
-def begin(state, now):
-    """Stamps a start: last_start and running, local and in seconds, and next_due, when the next automatic review may
-    start, in seconds since the epoch. Returns the start, which also names the digest."""
-    started = datetime.fromtimestamp(int(now))
-    next_due = int(now + timedelta(hours=REVIEW_EVERY_HOURS).total_seconds())
-    state.update(last_start=started.isoformat(), running=started.isoformat(), next_due=next_due)
-    site_notes.write_review_state(state)
-    return started
-
-
-def finish(state, failure=None, reviewed=False):
-    """Records a start's end: a failure counts toward turning automatic reviews off, a review clears the count, and a
-    start that launched nothing changes neither."""
-    if failure:
-        count_failure(state)
-    elif reviewed:
-        state["failures"] = 0
-    state["running"] = None
-    site_notes.write_review_state(state)
-
-
 def review_command(claude, budget):
     """The design's §7.4 command, as an argument list: no shell, no tools, no settings files, MCP servers or hooks."""
     return [
@@ -1261,10 +1219,26 @@ def claim_attempt(state, kind, batch, now):
     return attempt
 
 
+def preflight_lines(init, result, launch_failure, problems):
+    """Phase 8's checks (docs/failure-review-plan.md 8.1): login, schema, the first event's tools and MCP servers."""
+    login = launch_failure or result_failure(result)
+    schema = login or "; ".join(problems)
+    source = "structured output" if result.get("structured_output") is not None else "the reply's text only"
+    servers = init.get("mcp_servers") or []
+    return [
+        f"login check: {'failed: ' + login if login else 'ok'}",
+        f"schema check: {'failed: ' + schema if schema else 'ok, from ' + source}",
+        "tools: " + (", ".join(map(str, init.get("tools") or [])) or "none"),
+        "MCP servers: " + (", ".join(str(item.get("name") if isinstance(item, dict) else item) for item in servers)
+                           or "none"),
+    ]
+
+
 def launch_attempt(attempt, batch):
     """Only dispatch lock survives the model wait; short locks protect each transition."""
     quote = str if batch is None else None
     spawn_attempted = False
+    diagnostics = []
 
     def transition(**changes):
         # Attempt files are written only by the dispatch lock's holder (claim, these transitions, settlement and
@@ -1293,13 +1267,13 @@ def launch_attempt(attempt, batch):
                         batch, load_runs(), envelope["notes"], site_notes.read_exclude(site_notes.EXCLUDE_PATH)),
                         write=False)
                 quote = privacy_quote(queue)
-        init, result, failure = launch(attempt["sent_text"], attempt["budget_usd"], quote,
-                                      before_spawn=spawning,
-                                      on_spawn=spawned, on_exit=exited)
+        init, result, launch_failure = launch(attempt["sent_text"], attempt["budget_usd"], quote,
+                                             before_spawn=spawning,
+                                             on_spawn=spawned, on_exit=exited)
         cost = (result or {}).get("total_cost_usd")
         # A paid reply's known cost is kept before it is applied, so no later failure or crash loses it.
         transition(status="returned", cost=cost if review_records.valid_cost(cost) else None)
-        failure = failure or result_failure(result or {}, quote)
+        failure, problems = launch_failure or result_failure(result or {}, quote), []
         if failure is None:
             reply = reply_of(result)
             if batch:
@@ -1308,6 +1282,8 @@ def launch_attempt(attempt, batch):
             else:
                 problems = schema_errors(reply, REVIEW_SCHEMA)
             failure = "the reply was refused: " + "; ".join(problems) if problems else None
+        if batch is None:
+            diagnostics = preflight_lines(init, result or {}, launch_failure, problems)
         attempt.update(status="failed" if failure else "succeeded", error=failure)
     except Superseded:
         attempt.update(status="superseded", error="Batch dependencies changed while the reviewer was running")
@@ -1342,6 +1318,8 @@ def launch_attempt(attempt, batch):
             settle_attempt(state, attempt)
         else:
             raise DispatchBlocked("Reviewer child exit is not verified; no new paid launch is allowed")
+    for line in diagnostics:
+        print(line)
     print(f"review {attempt['attempt_id']}: {attempt['status']}; cost {money(attempt['cost'])}")
     if attempt.get("error"):
         print(attempt["error"])
@@ -1461,7 +1439,7 @@ def recover_command():
     except ReviewBusy:
         print(BUSY)
         return 1
-    except (OSError, review_records.RecordError):
+    except (OSError, ValueError):  # storage, a malformed record, or a notes file that fails its own checks
         print("Recovery failed; the receipt is retained. Inspect artifacts/reviews and the notes file, then retry.")
         return 1
     print(f"Recovered the committed digest: {path}" if path else "Nothing to recover.")

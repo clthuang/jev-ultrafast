@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from . import site_notes
@@ -120,8 +120,8 @@ def valid_time(value):
 
 
 def timestamp(value):
-    parsed = datetime.fromisoformat(value)
-    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    """Seconds since the epoch. A stored time without a zone was written as local time, so it is read as local."""
+    return datetime.fromisoformat(value).timestamp()
 
 
 def valid_cost(value):
@@ -231,6 +231,9 @@ def validate(record, kind):
                     or not isinstance(relation.get('successors'), list)
                     or not all(isinstance(value, str) and RUN_ID.fullmatch(value) for value in relation['successors'])):
                 raise RecordError('Malformed dependency parent/successors')
+        since = record.get('since')
+        if since is not None and (not isinstance(since, str) or not re.fullmatch(r'\d{8}', since)):
+            raise RecordError('Malformed batch window')
         if (not isinstance(record.get('deferred'), list)
                 or any(not isinstance(item, dict) or item.get('kind') not in {'runs', 'notes'}
                        or not string(item.get('id')) or item.get('reason') not in {'item_cap', 'byte_cap'}
@@ -262,6 +265,7 @@ def validate(record, kind):
                 or record['finished_at'] is not None and not valid_time(record['finished_at'])
                 or record.get('batch_id') is not None and not ID.fullmatch(str(record['batch_id']))
                 or record.get('budget_usd') != (0.05 if record['kind'] == 'preflight' else 0.5)
+                or record.get('error') is not None and not isinstance(record['error'], str)
                 or not isinstance(record.get('sent_text'), str)
                 or record.get('sent_sha256') != hashlib.sha256(record['sent_text'].encode('utf-8')).hexdigest()):
             raise RecordError('Malformed review attempt')

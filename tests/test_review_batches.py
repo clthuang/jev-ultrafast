@@ -777,7 +777,7 @@ def test_note_referencing_domain_excluded_run_is_not_sent():
 
 
 @pytest.mark.parametrize('mutation', ['empty_dependencies', 'missing_source', 'missing_items', 'missing_sent',
-                                      'unknown_summary', 'mismatched_items'])
+                                      'unknown_summary', 'mismatched_items', 'bad_window'])
 def test_batch_corruption_is_rejected_before_application(mutation):
     write_run()
     batch = review_runs.prepare_batch()
@@ -789,6 +789,8 @@ def test_batch_corruption_is_rejected_before_application(mutation):
         broken.pop(missing[mutation])
     elif mutation == 'unknown_summary':
         broken['summary_version'] = 2
+    elif mutation == 'bad_window':
+        broken['since'] = '2026-09-29'  # run IDs start 20260929; a malformed window would raise TypeError later
     else:
         broken['items'][0]['version'] = 'f' * 64
     with pytest.raises(review_records.RecordError):
@@ -915,6 +917,7 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
 
 import io  # noqa: E402
 import sys  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 LEGACY_START = '2026-09-27T09:00:00'
@@ -1057,3 +1060,46 @@ def test_queue_holding_only_oversized_items_says_so(monkeypatch, capsys):
     assert f"deferred: run {RUN_A} (over the batch's byte limit)" in output.err.splitlines()
     assert 'Nothing fits a batch; the deferred items need a manual look.' in output.err
     assert 'Nothing is queued.' not in output.err
+
+
+def test_attempt_error_must_be_text(fake_paid):
+    write_run()
+    attempt = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    with pytest.raises(review_records.RecordError):
+        review_runs.save_attempt({**attempt, 'error': {'raw': 'provider object'}})
+    path = review_runs.attempt_path(attempt['attempt_id'])
+    path.write_text(json.dumps({**attempt, 'error': 123}))
+    with pytest.raises(review_records.RecordError):
+        review_records.read(path, 'attempt')
+
+
+def test_pending_receipt_must_match_its_digest(monkeypatch, capsys):
+    recovery()
+    batch = review_runs.prepare_batch()
+    real = review_runs.store_io.publish
+    monkeypatch.setattr(review_runs.store_io, 'publish', lambda target, value, **options: (
+        (_ for _ in ()).throw(OSError('injected')) if options.get('immutable') else real(target, value, **options)))
+    with pytest.raises(review_runs.RecoveryPending):
+        apply_batch(batch, {**EMPTY_REPLY, 'decisions': [add_decision()]})
+    envelope = json.loads(site_notes.NOTES_PATH.read_text())
+    envelope['pending_review']['batch_id'] = 'f' * 32  # no longer the batch its digest records
+    site_notes.NOTES_PATH.write_text(json.dumps(envelope))
+    with pytest.raises(site_notes.NotesStoreError):
+        site_notes.read_envelope(site_notes.NOTES_PATH)
+    monkeypatch.setattr(review_runs.store_io, 'publish', real)
+    assert review_runs.main(['recover']) == 1 and 'receipt is retained' in capsys.readouterr().out
+    assert json.loads(site_notes.NOTES_PATH.read_text()) == envelope  # nothing rewrote the evidence
+
+
+def test_naive_stored_times_are_read_as_local_times(monkeypatch):
+    """Stored times carry no zone and are written with datetime.now(): read them as local, not UTC."""
+    monkeypatch.setenv('TZ', 'Asia/Taipei')
+    time.tzset()
+    try:
+        moment = 1_790_000_000
+        stored = datetime.fromtimestamp(moment).isoformat()
+        assert review_records.timestamp(stored) == moment
+        assert review_records.timestamp(datetime.fromtimestamp(moment, timezone.utc).isoformat()) == moment
+    finally:
+        monkeypatch.undo()
+        time.tzset()

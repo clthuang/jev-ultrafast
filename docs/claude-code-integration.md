@@ -419,7 +419,7 @@ Each decision entry also gains the page's `omitted_actions` count.
    - Then compare the report by source hash.
 2. **Executor bugs → offline tests:** a failing run's stored page read becomes a fixture for the deterministic code, with no API calls.
 3. **Confidence stop:** add one when the report shows low-confidence steps predict failure (§10).
-4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply`, which checks them. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
+4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply --batch <id>`, which checks them against that exact batch. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
 5. **After editing the code,** reconnect the server with `/mcp`. It runs the code it started with, and the source hash shows which.
 
 ### 7.6 Privacy and data flows
