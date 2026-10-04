@@ -161,6 +161,17 @@ def seeds_dated_today():
     site_notes.update(redate)
 
 
+def acknowledge_waiting(monkeypatch, capsys):
+    """Review what waits now with an empty reply, through the real batch and apply, as a first review would. A batch
+    holds at most MAX_BATCH_NOTES notes, oldest first, so a test that adds notes beside the four seeds needs this to
+    have its own notes selected."""
+    batch = review_runs.prepare_batch()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(EMPTY_REPLY)))
+    review_runs.main(["apply", "--batch", batch["batch_id"]])
+    capsys.readouterr()
+    return batch
+
+
 def unapproved_note(site="example.com"):
     """An unapproved note stored as a lesson is, beside the four approved seeds; returns its ID."""
     return site_notes.add_note({
@@ -208,7 +219,8 @@ def test_summaries_hold_no_typed_values_page_text_or_query_values(capsys):
         "and the message read see "
         "https://example.com/help?sid=SIDSECRET42, then visit https://docs.example.net/x?t=GUARDSECRET42; the website "
         "field shows https://lee.me. It kept it (https://lee.me); note developer.mozilla.org-1 was shown on "
-        f"example.com, unlike run 20260926-090000-0001 or run <value>-<value>-<value>; ref 12345678-123456-abcd; as Jane Doe."
+        "example.com, unlike run 20260926-090000-0001 or run <value>-<value>-<value>; "
+        "ref 12345678-123456-abcd; as Jane Doe."
     )
     # Typed values in a path: plainly, joined to a word by an underscore, and names joined by "+", "-" or "_".
     back_on = (f"back on https://example.com:443/u/jane_doe/by/Bobby+Lee/people/bo-lee/wiki/Bo_Lee/{CANARY}_Tours/"
@@ -265,7 +277,7 @@ def test_summaries_hold_no_typed_values_page_text_or_query_values(capsys):
         "<value> on flight UA<value>; it opened https://user<value>.<value>.net:<value>/x and <value>://open, searched "
         "<value> and <value>.<value>, and the message read <value>/help?sid= then <value>://docs.<value>.net/x?t= the "
         "website field shows <value>. It kept it (<value>); note developer.mozilla.org-1 was shown on example.com, "
-        f"unlike run <value>-<value>-<value> or run <value>-<value>-<value>; ref <value>-abcd; as <value>."
+        "unlike run <value>-<value>-<value> or run <value>-<value>-<value>; ref <value>-abcd; as <value>."
     ) in out
     assert VISIBLE_TEXT not in out and REQUEST_TEXT not in out
     # URLs lose their query values before any value is matched, so the quoted search hides none of the final URL's.
@@ -431,6 +443,8 @@ def test_apply_applies_checked_note_decisions_and_writes_the_digest(monkeypatch,
     ],
 )
 def test_apply_refuses_bad_replies(change, reason, monkeypatch, capsys):
+    # The four seeds plus this test's two notes would exceed the batch's five; the seeds were reviewed before.
+    acknowledge_waiting(monkeypatch, capsys)
     unapproved_note()
     # A lesson after a run that ended on about:blank has no site; it must not switch the reply's checks off.
     site_notes.add_note({"site": "", "hint": "use_claude_in_chrome", "detail": None, "url": None, "failure": None,
@@ -443,6 +457,30 @@ def test_apply_refuses_bad_replies(change, reason, monkeypatch, capsys):
     assert reason in capsys.readouterr().out
     assert site_notes.NOTES_PATH.read_bytes() == notes_before  # nothing approved, retired or changed
     assert not any(decision["applied"] for digest in digests() for decision in digest["decisions"])
+
+
+@pytest.mark.parametrize("action", ["flag", "retire"])
+def test_decisions_on_a_deferred_note_are_refused(action, monkeypatch, capsys):
+    """A reviewer never saw a note its batch deferred, so a reply cannot flag or retire it; it stays unacknowledged
+    and waits for the next batch."""
+    unapproved_note()  # with the four older seeds, the fifth and last note a batch holds
+    deferred = unapproved_note("example.org")
+    write_run(FAILED, site="example.org")
+    batch = review_runs.prepare_batch()
+    assert deferred not in batch["notes"]
+    assert {"kind": "notes", "id": deferred, "reason": "item_cap"} in batch["deferred"]
+    notes_before = site_notes.NOTES_PATH.read_bytes()
+    decision = {**retire(deferred, FAILED), "action": action}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({**EMPTY_REPLY, "decisions": [decision]})))
+    review_runs.main(["apply", "--batch", batch["batch_id"]])
+    assert f"decision 1, {action}: refused: the note is not selected in this batch" in capsys.readouterr().out
+    notes_after = json.loads(site_notes.NOTES_PATH.read_text())["notes"]
+    assert notes_after == json.loads(notes_before)["notes"]
+    assert review_runs.prepare_batch()["notes"] == {deferred: batch_note_version(deferred)}
+
+
+def batch_note_version(note_id):
+    return review_runs.note_hash(stored(note_id))
 
 
 def test_approve_needs_a_terminal_and_shows_the_line(monkeypatch, capsys):
@@ -614,7 +652,8 @@ def test_auto_kills_after_15_minutes(launches, monkeypatch):
             self.function(*self.args)
 
     def stream():  # a session that prints nothing, then ignores SIGTERM
-        pending.extend(json.loads(path.read_text()) for path in (review_runs.REVIEWS / "attempts").glob("*.json"))  # a SIGKILL of the whole review here would leave this digest (7.4's X1)
+        # A SIGKILL of the whole review here would leave this digest (7.4's X1).
+        pending.extend(json.loads(path.read_text()) for path in (review_runs.REVIEWS / "attempts").glob("*.json"))
         timers[-1].fire()  # 15 minutes pass with no event: SIGTERM
         timers[-1].fire()  # still running EXIT_SECONDS later: SIGKILL, and the stream ends
         yield from ()
@@ -629,7 +668,8 @@ def test_auto_kills_after_15_minutes(launches, monkeypatch):
     assert_failed_digest(launches, "no result within 15 minutes", run_ids)
     [digest] = pending
     assert digest["status"] == "running"
-    assert (digest["sent_text"], [item["id"] for item in digest["input_items"] if item["kind"] == "runs"]) == (launches.calls[0]["stdin"], run_ids)
+    sent_runs = [item["id"] for item in digest["input_items"] if item["kind"] == "runs"]
+    assert (digest["sent_text"], sent_runs) == (launches.calls[0]["stdin"], run_ids)
 
 
 def test_once_reviews_a_window_and_records_cost(launches, monkeypatch):
@@ -700,7 +740,8 @@ def test_a_failure_never_quotes_a_task_value(case, capsys):
     queue = review_runs.build_queue()
     quote_value = review_runs.privacy_quote(queue)
     if case == 'schema':
-        path, problems = review_runs.record_review({**EMPTY_REPLY, CANARY: 'bad'}, review_runs.prepare_batch(), '', datetime.now(), None)
+        path, problems = review_runs.record_review({**EMPTY_REPLY, CANARY: 'bad'}, review_runs.prepare_batch(), '',
+                                                   datetime.now(), None)
         assert path is None
         text = '; '.join(problems)
         assert text == 'reply has an unknown key <value>'
