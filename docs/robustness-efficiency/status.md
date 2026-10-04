@@ -17,8 +17,8 @@ changed, as §2 and §3 record.
 | Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
 | Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
 | Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Done, 2026-10-04 | Cloud, `0e48727`: 10 named nodes / 52 variants with `--native`, 714 offline tests, 31 browser-native tests plus the egress proof, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only, then READY (60 of 62 mutants caught, 2 equivalent) (§4.2) |
-| Readiness | READINESS-1…3, GATE-READINESS | Implemented; gate review pending | Cloud: 45 named nodes / 48 variants with `--native` (`plan_tests.py READINESS`), 40 native tests, `check_guards.py` 25 checks; the case-by-case record in `readiness-test-map.md` (§4.3) |
-| Release | RELEASE-1…3, GATE-RELEASE | Not started | — |
+| Readiness | READINESS-1…3, GATE-READINESS | Implemented at `952ef93`; gate review to re-run (§5) | Cloud: 45 named nodes / 48 variants with `--native` (`plan_tests.py READINESS`), 40 native tests, `check_guards.py` 25 checks; the case-by-case record in `readiness-test-map.md` (§4.3) |
+| Release | RELEASE-1…3, GATE-RELEASE | RELEASE-3 drafted at `f476832`; RELEASE-1 and RELEASE-2 not started | `scripts/rehearse_activation.py` passes on both disposable stores; 801 offline tests; wheel smoke 19 sources (§4.4, §5) |
 
 Re-run in the cloud on 2026-10-04 at `a94014b` (main after consolidation): every plan-named node through REVIEWS-7
 exists and passes — 90 nodes, 244 variants, none skipped or xfailed, the 3 native SELECT nodes included
@@ -312,3 +312,43 @@ YouTube) and H5's arXiv repeats, which need live sites and paid models; they rem
    attempts), a verified backup (hash under locks, read back), state migration, a dry-run inventory, refusal of a missing
    store, and a compatibility export the baseline code can read (notes list; v2 acknowledgments as legacy digests so a
    rollback does not requeue everything). Rehearse the runbook end to end on disposable state with fake launchers.
+
+## 5. Checkpoint and how to resume (2026-10-04)
+
+Work stopped here because the session's credit ran low. Everything is committed and pushed on
+`claude/busy-edison-lx8bhh` (draft PR #2). Nothing below has been started beyond what it says.
+
+**State at the checkpoint.**
+
+- **GATE-REVIEWS** and **GATE-SNAPSHOT** are done, with their independent reviews READY (§4.1, §4.2).
+- **READINESS** is implemented at `952ef93`: offline, native and mutation evidence is in §4.3. Two independent
+  reviews of that commit were started (`execution_review`: the gate and reread semantics, concurrency, stop handling and
+  test strength; `browser_review`: the owned connection, the lab's second fixture site and egress, the native evidence
+  and every doc claim). Both were stopped before reporting, to save credit. No finding from them is known.
+- **RELEASE-3** is drafted at `f476832`, ahead of RELEASE-1 and RELEASE-2. It holds the storage tool, its 15 tests, the
+  baseline frozen from `3efae4f`, the rehearsal and the runbook (§4.4, [activation-runbook.md](activation-runbook.md)).
+  It has had no independent review.
+- A read-only audit of the docs against the code for RELEASE-1 was also started and stopped before reporting.
+
+**Resume in this order.**
+
+1. **GATE-READINESS:** re-run the two independent reviews on the readiness commit, scoped as above. Fix every blocker
+   and should-fix with a test that fails before the fix, record the verdicts in §4.3, and mark the gate done.
+2. **RELEASE-1:** reconcile README and the docs with the shipped API, statuses and limits (the plan's RELEASE-1 Pass
+   line); re-run the docs audit first.
+3. **RELEASE-2:** run every check in AGENTS.md at one commit, plus `scripts/plan_tests.py` for every stage with
+   `--native`, `scripts/validation_lab.py run`, `scripts/check_guards.py` in a lab and `scripts/wheel_smoke.py`. Then an
+   independent implementation review of the final diff, and a separate premortem with fault injection.
+4. **RELEASE-3:** review the drafted tooling, re-run `scripts/rehearse_activation.py` at the release commit, and record
+   its evidence.
+5. **GATE-RELEASE:** the change summary, the migration notes, every review and the explicit unrun checks.
+
+**Open decision for the user.** The loading wait's default with your own Chrome (§4.3): built as on with an explicit
+endpoint, and on with your own Chrome only behind `JEV_LOADING_GATE=1`.
+
+**Not verifiable in this container, still open.**
+
+- Chrome's "Allow remote debugging?" prompt for the loading wait's connection.
+- Writer detection on macOS (`ps`/`lsof`).
+- The live-site acceptance of §4.6 (H8c's gate arm) and H5 on arXiv.
+- Activating the real store, which its owner does with the runbook after GATE-RELEASE.
