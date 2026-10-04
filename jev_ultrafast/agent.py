@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import run_store
-from .browser import Browser, StalePage, UncertainAction
+from .browser import Browser, SnapshotTooLarge, StalePage, UncertainAction
 from .contracts import (
     TERMINAL_STATES,
     InvalidDecision,
@@ -62,7 +62,17 @@ class Agent:
         policy = validate_allowed_operations(allowed_operations)
         task = validate_goal(goal)
         setup_started = time.monotonic()
-        page = self.browser.observe(screenshot=self.screenshots)
+        try:
+            page = self.browser.observe(screenshot=self.screenshots)
+        except SnapshotTooLarge as error:
+            # Too large to observe: nothing from the earlier read may execute, so no decision or text stays pending,
+            # and an unfinished earlier goal stops. A finished run's file is never rewritten.
+            self.pending_text = None
+            self.state["decision"] = None
+            if self.state["status"] not in TERMINAL_STATES:
+                self.state["snapshot_overflow"] = error.details
+                self.mark_stopped("snapshot_too_large")
+            raise
         self.pending_text = None
         self.trace_path = trace_path
         self._fresh_state(task, page, allowed_sites, allow_commit, allowed_operations=list(policy))
@@ -245,6 +255,13 @@ class Agent:
             result = self._command(name, body)
         except asyncio.CancelledError:
             self.mark_stopped("cancelled")
+            raise
+        except SnapshotTooLarge as error:
+            # Terminal at every read: no stale page to fall back on, no recovery read, no pending decision or text.
+            # A step that already ran stays recorded, with no page read after it.
+            if self.state["status"] not in TERMINAL_STATES:
+                self.state["snapshot_overflow"] = error.details
+                self.mark_stopped("snapshot_too_large")
             raise
         except Exception as error:
             if (not isinstance(error, StalePage) and self.state["status"] not in TERMINAL_STATES

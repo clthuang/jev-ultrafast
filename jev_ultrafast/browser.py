@@ -14,38 +14,23 @@ from browser_harness import _ipc as ipc
 from browser_harness.admin import NAME, daemon_browser_kind, ensure_daemon, restart_daemon
 from browser_harness.helpers import cdp
 
-# Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
-MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+from .contracts import RunStopped
+
+# Snapshot schema 2 (docs/robustness-efficiency/status.md §4.2): the page keeps the latest observation's exact
+# baseline behind a small token. observe() alone replaces it; fresh(), target() and select() only read it.
+LIBRARY = Path(__file__).with_name("snapshot.js").read_text().strip()
+READ_STATE = f"({LIBRARY}).observe()"
+FRESH = f"({LIBRARY}).fresh"  # FRESH(token, action): read-only comparison with that read's baseline
+TARGET = f"({LIBRARY}).target"  # TARGET(token, action): an offered CLICK/fill node's geometry and hit test
 # One synchronous browser task owns both validation and mutation. No await, retry, or value-based fallback.
-SELECT_ACTION = """(({action,page_key,guard}) => {
-  const rejected=reason=>({status:'rejected_before_input',reason});
-  const cache=window.__jevFast, option=action.option;
-  if (!cache || !option || option.document_id!==performance.timeOrigin || option.cache_epoch!==cache.epoch)
-    return rejected('Dropdown document or cache changed');
-  if (!Number.isInteger(action.node) || option.select_id!==action.node || !Number.isInteger(option.option_id) ||
-      !Number.isInteger(option.observed_index) || option.observed_index<0 || option.selected!==false ||
-      option.effective_disabled!==false || !Array.isArray(page_key) || !Array.isArray(guard))
-    return rejected('Dropdown descriptor is invalid');
-  const select=cache.nodes.get(option.select_id), chosen=cache.nodes.get(option.option_id);
-  if (!select?.isConnected || select.tagName!=='SELECT' || select.multiple || !chosen?.isConnected ||
-      chosen.tagName!=='OPTION' || chosen.closest('select')!==select ||
-      select.options[option.observed_index]!==chosen) return rejected('Dropdown option identity changed');
-  const disabled=select.matches(':disabled') || chosen.disabled || !!chosen.closest('optgroup[disabled]');
-  if (disabled!==option.effective_disabled || chosen.label!==option.label || chosen.value!==option.value ||
-      chosen.selected!==option.selected) return rejected('Dropdown option meaning or state changed');
-  if (select.closest('[aria-disabled="true"],[aria-hidden="true"],[inert]') ||
-      !select.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return rejected('Dropdown is unavailable');
-  if (JSON.stringify(cache.pageKey())!==JSON.stringify(page_key) ||
-      JSON.stringify(cache.guard(select))!==JSON.stringify(guard)) return rejected('Dropdown page context changed');
-  const r=select.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-  if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight ||
-      !select.contains(document.elementFromPoint(x,y))) return rejected('Dropdown is covered or outside the viewport');
-  select.selectedIndex=option.observed_index;
-  select.dispatchEvent(new Event('input',{bubbles:true}));
-  select.dispatchEvent(new Event('change',{bubbles:true}));
-  return {status:'executed',action_id:action.id};
-})"""
+SELECT_ACTION = f"({LIBRARY}).select"
+SNAPSHOT_SCHEMA = 2
+MAX_SNAPSHOT_BYTES = 262_144
+MAX_TARGETS = 250
+TOKEN_KEYS = frozenset({"schema", "epoch", "generation", "document_id"})
+# Protocol identity, never progress: excluded from fingerprint() wherever it is nested.
+PROTOCOL_KEYS = frozenset({"observation_token", "snapshot_schema", "snapshot_stats", "document_id", "cache_epoch"})
+OVERFLOW_COUNTS = ("limit", "characters", "candidates", "omitted_actions", "evidence", "text_characters")
 # lsof lives in /usr/sbin on macOS, which a minimal PATH leaves out.
 LSOF = shutil.which("lsof", path="/usr/sbin:/usr/bin:/sbin:/bin")
 
@@ -78,6 +63,28 @@ class StalePage(ValueError):
 
 class UncertainAction(RuntimeError):
     """A dispatched mutation may have executed; preserve its attempt and never retry it."""
+
+
+class SnapshotTooLarge(RunStopped):
+    """An observation over the transport ceiling: a terminal stop, never a stale page to recover from or retry."""
+
+    def __init__(self, details=None):
+        details = details if isinstance(details, dict) else {}
+        self.details = {key: details[key] for key in OVERFLOW_COUNTS if type(details.get(key)) is int}
+        super().__init__("snapshot_too_large", f"The page's observation exceeds {MAX_SNAPSHOT_BYTES:,} bytes; "
+                                               "no label was truncated and nothing ran from it.")
+
+
+def observation_token(page):
+    """The page's schema-2 token, or None: a legacy or malformed page can be reported, never executed."""
+    if not isinstance(page, dict) or page.get("snapshot_schema") != SNAPSHOT_SCHEMA:
+        return None
+    token = page.get("observation_token")
+    if (not isinstance(token, dict) or set(token) != TOKEN_KEYS or token["schema"] != SNAPSHOT_SCHEMA
+            or not isinstance(token["epoch"], str) or type(token["generation"]) is not int
+            or token["generation"] < 1 or type(token["document_id"]) not in (int, float)):
+        return None
+    return token
 
 
 def checked_cdp(method, *, session_id, check_stop=None, remaining_budget=None, **params):
@@ -191,29 +198,29 @@ class Browser:
         raise StalePage("Page did not settle")
 
     def fresh(self, page, action=None, **control):
-        if action is not None and action["kind"] in {"click", "select"}:
-            node = action["node"]
-            if type(node) is not int:
-                return False
-            current = self.evaluate(
-                "(() => { const c=window.__jevFast; "
-                f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()", **control,
-            )
-            return current == [page["page_key"], page["guards"].get(str(node))]
-        return self.evaluate(MARKER, **control) == page["marker"]
+        """Compare the page with the baseline this read installed. Never installs one: asking again after a change
+        is still false. CLICK and SELECT compare their own guard; anything else, the whole page's semantics."""
+        token = observation_token(page)
+        if token is None:
+            return False
+        result = self.evaluate(f"{FRESH}({json.dumps(token)},{json.dumps(action)})", **control)
+        if result == {"status": "snapshot_too_large"}:
+            raise SnapshotTooLarge()
+        return result is True
 
     def act(self, action, page, text=None, *, check_stop=None, remaining_budget=None, on_phase=None):
         control = {"check_stop": check_stop, "remaining_budget": remaining_budget} if check_stop else {}
         if check_stop:
             check_stop()
+        token = observation_token(page)
+        if token is None:  # a legacy or malformed read: no browser call, nothing runs
+            raise StalePage("This page read cannot be executed. Observe again.")
         if action["kind"] != "select" and not self.fresh(page, action, **control):
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(min(0.1, remaining_budget()) if remaining_budget else 0.1)
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text,
-                                    "page_key": page.get("page_key"),
-                                    "guard": page.get("guards", {}).get(str(action.get("node")))},
-                                   on_phase=on_phase, **control)
+                                    "token": token}, on_phase=on_phase, **control)
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
@@ -238,16 +245,22 @@ class Browser:
             self.target = None
 
 
+def without_protocol(value):
+    """value with protocol identity removed at every depth: tokens and caches are not progress."""
+    if isinstance(value, dict):
+        return {key: without_protocol(item) for key, item in value.items() if key not in PROTOCOL_KEYS}
+    if isinstance(value, list):
+        return [without_protocol(item) for item in value]
+    return value
+
+
 def fingerprint(state):
+    """Progress: URL, visible text, the offered actions with their geometry, scroll position and height, and
+    multi-select evidence. Unchanged from schema 1, so a re-read of an unchanged page is no progress."""
     content = {k: state[k] for k in ("url", "text", "actions", "scroll")}
-    content["actions"] = [
-        {**action, "option": {key: value for key, value in action["option"].items()
-                              if key not in {"document_id", "cache_epoch"}}} if "option" in action else action
-        for action in state["actions"]
-    ]
     if state.get("evidence"):
         content["evidence"] = state["evidence"]
-    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(without_protocol(content), sort_keys=True).encode()).hexdigest()
 
 
 def browser_operation(request, *, check_stop=None, remaining_budget=None, on_phase=None):
@@ -317,7 +330,7 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
         action = request["action"]
         kind = action["kind"]
         if kind == "select":
-            payload = {"action": action, "page_key": request.get("page_key"), "guard": request.get("guard")}
+            payload = {"action": action, "token": request.get("token")}
             response = mutate("Runtime.evaluate", "select",
                               expression=SELECT_ACTION + "(" + json.dumps(payload) + ")", returnByValue=True)
             try:
@@ -331,6 +344,10 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
                 input_started = False
                 phase("rejected_before_input", persist=False)
                 raise StalePage(result["reason"])
+            if result == {"status": "snapshot_too_large"}:  # tagged before any assignment: nothing ran
+                input_started = False
+                phase("rejected_before_input", persist=False)
+                raise SnapshotTooLarge()
             if result != {"status": "executed", "action_id": action["id"]}:
                 raise UncertainAction("Dropdown execution was not confirmed; inspect before starting another goal.")
             return {"executed": action["id"]}
@@ -340,18 +357,9 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
-            # Code-owned node IDs refer to actual observed elements, never model-generated selectors.
-            target = evaluate("""(action => {
-              const e=window.__jevFast?.nodes.get(action.node);
-              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
-                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
-              if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              const hit=document.elementFromPoint(x,y);
-              if (!e.contains(hit)) return hit ? {covered:hit.localName.slice(0,40)} : null;
-              return {x,y};
-            })(""" + json.dumps(action) + ")")
+            # Code-owned node IDs refer to actual observed elements, never model-generated selectors: the target is
+            # the node this read offered under its token, resolved with current geometry and hit-tested.
+            target = evaluate(f"{TARGET}({json.dumps(request.get('token'))},{json.dumps(action)})")
             if target is None or "covered" in target:
                 if target:  # the topmost element at the target's center; its tag name is page-controlled text
                     raise StalePage(f"Target is covered by <{target['covered']}>. Observe again.")
@@ -371,6 +379,12 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
     info = evaluate(READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
+    if isinstance(info, dict) and "snapshot_too_large" in info:  # before the screenshot: no partial page escapes
+        raise SnapshotTooLarge(info["snapshot_too_large"])
+    if (observation_token(info) is None or not isinstance(info.get("actions"), list)
+            or sum(isinstance(a, dict) and a.get("kind") in {"click", "fill", "select"} for a in info["actions"])
+            > MAX_TARGETS):
+        raise StalePage("The page returned a malformed observation")
     info["fingerprint"] = fingerprint(info)
     if request.get("screenshot", True):
         info["screenshot"] = call("Page.captureScreenshot", format="jpeg", quality=72)["data"]

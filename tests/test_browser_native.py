@@ -108,7 +108,7 @@ def test_native_select_rejects_changed_observed_option(native_browser, lab_manif
         if mutation == "cache reset":
             after = native_browser.observe(screenshot=False)
             assert after["fingerprint"] == page["fingerprint"]
-            assert action_for(after)["option"]["cache_epoch"] != action["option"]["cache_epoch"]
+            assert after["observation_token"]["epoch"] != page["observation_token"]["epoch"]
     monkeypatch.setattr(native_browser, "fresh", Mock(side_effect=AssertionError("No separate SELECT freshness read")))
     with pytest.raises(browser.StalePage):
         native_browser.act(action, page)
@@ -136,9 +136,11 @@ def test_native_multiple_select_has_evidence_without_any_click(native_browser, l
     assert observed["selected_options"] == [
         {"label": "First interest", "value": "one"}, {"label": "Second interest", "value": "two"}
     ]
-    native_nodes = native_browser.evaluate("""[...window.__jevFast.nodes].filter(([id,e])=>
-      e.closest('select')?.id==='multiple').map(([id])=>id)""")
-    assert not any(action.get("node") in native_nodes for action in page["actions"])
+    native_nodes = native_browser.evaluate("""(() => {const cache=window.__jevFast,
+      select=document.querySelector('#multiple');return {ids:[select,...select.options].map(e=>cache.ids.get(e))
+      .filter(id=>id!==undefined),retained:[...cache.nodes.values()].some(e=>select.contains(e))}})()""")
+    assert native_nodes["ids"] and native_nodes["retained"] is False
+    assert not any(action.get("node") in native_nodes["ids"] for action in page["actions"])
     assert not any(action.get("role") == "option" for action in page["actions"])
     elements, targets, controls = model.action_space(page["actions"], [], evidence=page["evidence"])
     assert targets == controls == {}

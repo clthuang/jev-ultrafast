@@ -138,6 +138,7 @@ def facts(run):
         "totals": {
             **{name: any(marker in note for note in result.get("notes", [])) for name, marker in STOP_NOTES.items()},
             "runs with omitted actions": any(d["omitted_actions"] > 0 for d in decisions),
+            "snapshot overflow stops": run.get("stop_code") == "snapshot_too_large",
             "site changes": len(hosts) > 1,
             "stale decisions": run["stale_decisions"],
             **{key: values[0] for key, values in token_counts.items()},

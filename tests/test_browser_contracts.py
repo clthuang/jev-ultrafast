@@ -33,27 +33,28 @@ MUTATIONS = {
     "unrelated field": "dom.field.value='new'",
     "context": "dom.form.innerText='Changed price'",
     "navigation": "performance.timeOrigin+=1",
-    "cache reset": "delete window.__jevFast;eval(snapshot)",
+    "cache reset": "delete window.__jevFast;eval(observe)",
+    "re-observed": "eval(observe)",  # any later observation replaces the baseline this decision was made on
 }
 
 
 def run_javascript(mutation="", **config):
+    """Evaluate browser.py's exact observe and SELECT expressions against the DOM adapter."""
     program = """
-const fs=require('node:fs');
 const dom=require(process.argv[1])(JSON.parse(process.argv[2]));
-const snapshot=fs.readFileSync(process.argv[3],'utf8');
-const page=eval(snapshot);
+const observe=process.argv[3];
+const page=eval(observe);
 const action=page.actions.find(a=>a.kind==='select' && a.option.observed_index===3);
-const payload=action ? {action,page_key:page.page_key,guard:page.guards[action.node]} : null;
+const payload=action ? {action,token:page.observation_token} : null;
 eval(process.argv[4]);
 const result=payload ? eval(process.argv[5])(payload) : null;
-const after=eval(snapshot);
+const after=eval(observe);
 console.log(JSON.stringify({page,after,result,events:dom.events,index:dom.select.selectedIndex,
   key:dom.select.selectedOptions[0]?.key}));
 """
     result = subprocess.run(
         ["node", "-e", program, str(ROOT / "tests/fixtures/select_dom.cjs"), json.dumps(config),
-         str(ROOT / "jev_ultrafast/snapshot.js"), mutation, browser.SELECT_ACTION],
+         browser.READ_STATE, mutation, browser.SELECT_ACTION],
         check=True, text=True, capture_output=True, timeout=10,
     )
     return json.loads(result.stdout)
@@ -71,7 +72,10 @@ def test_select_descriptor_tracks_identity_and_effective_state():
         assert descriptor["selected"] is descriptor["effective_disabled"] is False
         assert descriptor["label"] == action["label"].split(" → ")[1]
         assert descriptor["value"] == action["value"]
-        assert descriptor["document_id"] and descriptor["cache_epoch"]
+        # Document and cache identity live in the page's token, not in each descriptor.
+        assert set(descriptor) == {"select_id", "option_id", "observed_index", "label", "value", "selected",
+                                   "effective_disabled"}
+    assert browser.observation_token(page) == page["observation_token"]
     _, targets, _ = model.action_space(page["actions"])
     assert targets["SELECT"]["1:1"]["option"]["observed_index"] == 2
     assert targets["SELECT"]["1:2"]["option"]["observed_index"] == 3
@@ -114,9 +118,9 @@ def test_select_rejects_changed_observed_option(mutation):
 def test_select_protocol_epoch_is_not_progress():
     result = run_javascript("delete window.__jevFast")
     before, after = result["page"], result["after"]
-    assert before["actions"][0]["option"]["cache_epoch"] != after["actions"][0]["option"]["cache_epoch"]
+    assert before["observation_token"]["epoch"] != after["observation_token"]["epoch"]
     assert browser.fingerprint(before) == browser.fingerprint(after)
-    assert before["marker"] != after["marker"]
+    assert not {"marker", "page_key", "guards"} & set(before)  # nothing but the token crosses CDP
 
 
 UNCERTAIN_RESPONSES = [
@@ -176,7 +180,7 @@ def test_only_tagged_preinput_rejection_is_stale(monkeypatch):
     monkeypatch.setattr(browser, "cdp", dispatch)
     with pytest.raises(browser.StalePage, match="changed"):
         browser.browser_operation({"operation": "act", "session": "S", "action": action,
-                                   "page_key": page["page_key"], "guard": page["guards"][str(action["node"])]})
+                                   "token": page["observation_token"]})
     assert dispatch.call_count == 1
 
 

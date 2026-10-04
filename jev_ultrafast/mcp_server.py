@@ -24,7 +24,7 @@ from mcp.server.mcpserver import Image
 
 from . import run_store, site_notes
 from .agent import Agent
-from .browser import UncertainAction
+from .browser import SnapshotTooLarge, UncertainAction
 from .contracts import RunStopped, token_usage, validate_allowed_operations, validate_goal
 from .demo import load_environment
 from .model import action_space
@@ -247,6 +247,14 @@ def finish(agent, run_id, notes):
                                      check_stop=final_remaining, remaining_budget=final_remaining)
         image = base64.b64decode(page.pop("screenshot"))
         state["page"] = page  # the run file ends with the final page
+    except SnapshotTooLarge as error:
+        image = None  # the last page read stays only as a diagnostic, marked not fresh
+        notes.append(f"fresh read failed: {error}")
+        if state["status"] == "done":  # a DONE the final read cannot verify is not reported as done
+            elapsed = state["elapsed_ms"]  # the final read stays outside the run's time
+            state["snapshot_overflow"] = error.details
+            agent.mark_stopped("snapshot_too_large")
+            state["elapsed_ms"] = elapsed
     except Exception as error:
         image = None  # the result falls back to the last page read, marked not fresh
         notes.append(f"fresh read failed: {error}")

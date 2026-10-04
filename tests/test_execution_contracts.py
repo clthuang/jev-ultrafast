@@ -42,8 +42,12 @@ def observed_page():
             {"id": "scroll_up", "kind": "scroll", "label": "Scroll up", "delta": -500},
         ],
     }
+    page.update(snapshot_schema=2, observation_token=TOKEN)
     page["fingerprint"] = fingerprint(page)
     return page
+
+
+TOKEN = {"schema": 2, "epoch": "test-epoch", "generation": 1, "document_id": 1.5}
 
 
 def choice(action="field"):
@@ -609,7 +613,6 @@ def test_final_read_cannot_resume_or_hide_stop(monkeypatch, tmp_path, failure):
 def physical_agent(monkeypatch, *, action="button", trace_path=None):
     agent, clock = timed_agent(monkeypatch, action=action, trace_path=trace_path)
     page = agent.state["page"]
-    page.update(marker="marker", page_key=[], guards={"10": [], "20": []})
     real_browser = browser.Browser.__new__(browser.Browser)
     real_browser.session = "test"
     agent.browser = agent.state["browser"] = real_browser
@@ -620,16 +623,16 @@ def physical_agent(monkeypatch, *, action="button", trace_path=None):
         if method != "Runtime.evaluate":
             return {}
         expression = params["expression"]
-        if expression == browser.MARKER:
-            value = "marker"
-        elif expression == browser.READ_STATE:
+        if expression == browser.READ_STATE:
             value = deepcopy(page)
         elif expression.startswith(browser.SELECT_ACTION):
             value = {"status": "executed", "action_id": "option"}
-        elif "return c ?" in expression:
-            value = [[], []]
-        else:
+        elif expression.startswith(browser.FRESH):
+            value = True
+        elif expression.startswith(browser.TARGET):
             value = {"x": 50, "y": 60}
+        else:  # settling after an input
+            value = None
         return {"result": {"value": value}}
 
     monkeypatch.setattr(browser, "cdp", lambda method, **params: response(method, params))
@@ -674,8 +677,8 @@ def test_expiry_during_browser_preflight_prevents_input(monkeypatch, tmp_path, s
     def protocol(method, **params):
         result = response(method, params)
         expression = params.get("expression", "")
-        if (stage == "freshness" and "return c ?" in expression or
-                stage == "hit_test" and "document.elementFromPoint" in expression):
+        if (stage == "freshness" and expression.startswith(browser.FRESH) or
+                stage == "hit_test" and expression.startswith(browser.TARGET)):
             clock[0] = 90 if stop == "deadline" else 1
             cancelled[0] = stop == "cancellation"
         return result

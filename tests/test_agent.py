@@ -27,6 +27,8 @@ def page():
             {"id": "e3", "kind": "click", "label": "Go", "role": "button", "value": "", "node": 20},
             {"id": "wait", "kind": "wait", "label": "Wait"},
         ],
+        "snapshot_schema": 2,
+        "observation_token": {"schema": 2, "epoch": "test-epoch", "generation": 1, "document_id": 1.5},
     }
     state["fingerprint"] = fingerprint(state)
     return state
