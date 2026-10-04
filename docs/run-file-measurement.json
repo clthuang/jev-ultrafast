@@ -1,0 +1,1747 @@
+{
+  "task": "Find one-way flights from Zurich to London on October 22, 2026, for one adult in economy. Stop when matching flight options are visible. Do not select or book a flight.",
+  "departure": "2026-10-22",
+  "measured_on": "2026-09-24",
+  "scope": "Three alternating untraced/traced pairs, untraced first, of one task in one existing Chrome profile. Each run opens and closes its own background tab. All six attempts of this series are included; none was repeated or replaced. A first series of six, all verified, exposed a run-file defect that left a stale attempt and no final save; after the fix in agent.py all six were run again, and these are the measurement (first series under superseded_series). Timing: first prediction after the initial homepage observation through the accepted DONE; setup and the independent post-run verification are excluded. The traced arm passes trace_path, so Agent.save() writes run.json during the run and once more at the stop.",
+  "summary": {
+    "untraced": {
+      "runs": 3,
+      "passed": 3,
+      "median_ms": 81779
+    },
+    "traced": {
+      "runs": 3,
+      "passed": 3,
+      "median_ms": 65655
+    },
+    "gate": {
+      "rule": "traced median elapsed_ms within 10% of untraced median",
+      "traced_vs_untraced_percent": -19.7,
+      "within_10_percent": false,
+      "result": "failed as written: the traced median took 19.7% less time, outside ±10%",
+      "waived": true,
+      "waiver": "waived on the user's behalf, because tracing costs about 0.2% per run and the spread came from provider latency"
+    },
+    "run_file_checks": {
+      "rule": "run.json parses, attempt is null, status is done, final decision is DONE, decisions and history match state.json",
+      "passed": 3,
+      "runs": 3
+    },
+    "tokens": {
+      "requests": 98,
+      "median_input_per_request": 7684.0,
+      "mean_input_per_request": 9343,
+      "mean_output_per_request": 931,
+      "median_questions_per_request": 28.0,
+      "median_commit_questions_per_request": 25.0,
+      "median_commit_share_of_request_characters": 0.545,
+      "recorded_run": {
+        "departure": "2026-09-20",
+        "requests": 17,
+        "input_tokens": 90558,
+        "output_tokens": 6325,
+        "decision_median_ms": 178,
+        "elapsed_ms": 7073,
+        "mean_input_per_request": 5327,
+        "mean_output_per_request": 372
+      },
+      "mean_input_per_request_change_percent": 75.4
+    },
+    "decision_latency_ms": {
+      "median": 4133.5,
+      "recorded_run_median": 178,
+      "share_of_elapsed_percent_min_max": [
+        94.3,
+        97.5
+      ]
+    },
+    "save_microbenchmark": {
+      "source": "artifacts/measurements/2026-09-24-rerun/run6-traced/run.json",
+      "bytes": 580165,
+      "iterations": 200,
+      "write_ms_median_min_max": [
+        1.571,
+        1.54,
+        2.289
+      ],
+      "agent_save_ms_median_min_max": [
+        1.589,
+        1.567,
+        2.365
+      ],
+      "same_bytes": true,
+      "saves_rule": "in the timed window: 2 per executed step (before input, after logging) and 2 per stale drop that had saved its attempt (before input, after clearing it); 1 more at the stop, after timing",
+      "saves_in_timed_window_min_max": [
+        28,
+        32
+      ],
+      "pure_write_ms_per_run_min_max": [
+        44.5,
+        50.8
+      ],
+      "note": "Pure write cost: the real Agent.save() and the bare write in isolation, 200 times each, written to a scratch directory outside the repository."
+    },
+    "tracing_cost": {
+      "measure": "in-run leftover: elapsed_ms minus TypeSafe request, text-helper and browser-protocol (CDP) call time",
+      "leftover_ms": {
+        "untraced": [
+          22.3,
+          19.8,
+          23.2
+        ],
+        "traced": [
+          162.8,
+          163.0,
+          174.2
+        ]
+      },
+      "mean_difference_ms": 144.9,
+      "percent_of_traced_median": 0.221,
+      "note": "Every run executed 10 steps and no WAIT."
+    }
+  },
+  "latency_probe": {
+    "design": "Ten request bodies with more than 20 questions from the first series' state.json files (runs 1-6), each sent once as recorded and once with every commit_* question removed, alternating which went first, through jev_ultrafast.model.post_json and its client; then five 1-question Choice requests on a tiny state. 25 HTTP requests; post_json's internal retry was refused, never sent.",
+    "http_requests_sent": 25,
+    "http_529": [
+      {
+        "seq": 1,
+        "body_id": 0,
+        "version": "with",
+        "wall_ms": 3809.6
+      }
+    ],
+    "valid_pairs": 9,
+    "median_with_ms": 3614.7,
+    "median_without_ms": 3618.0,
+    "median_paired_latency_diff_ms": 248.0,
+    "median_paired_latency_diff_percent": 7.6,
+    "paired_latency_diff_ms_min_max": [
+      -850.2,
+      1196.3
+    ],
+    "median_with_input_tokens": 10330,
+    "median_without_input_tokens": 5690,
+    "median_paired_input_token_diff": 4640,
+    "median_paired_input_token_diff_percent": 81.5,
+    "median_paired_output_token_diff": 695,
+    "bodies": [
+      {
+        "body_id": 0,
+        "run": 1,
+        "decision_index": 0,
+        "operation_in_run": "CLICK",
+        "questions": 28,
+        "commit_questions": 25,
+        "recorded_latency_ms": 3129,
+        "recorded_input_tokens": 7314
+      },
+      {
+        "body_id": 1,
+        "run": 1,
+        "decision_index": 16,
+        "operation_in_run": "DONE",
+        "questions": 54,
+        "commit_questions": 51,
+        "recorded_latency_ms": 2637,
+        "recorded_input_tokens": 15174
+      },
+      {
+        "body_id": 2,
+        "run": 2,
+        "decision_index": 1,
+        "operation_in_run": "CLICK",
+        "questions": 31,
+        "commit_questions": 28,
+        "recorded_latency_ms": 7065,
+        "recorded_input_tokens": 8039
+      },
+      {
+        "body_id": 3,
+        "run": 2,
+        "decision_index": 10,
+        "operation_in_run": "CLICK",
+        "questions": 50,
+        "commit_questions": 47,
+        "recorded_latency_ms": 2338,
+        "recorded_input_tokens": 13047
+      },
+      {
+        "body_id": 4,
+        "run": 3,
+        "decision_index": 2,
+        "operation_in_run": "TYPE_TEXT",
+        "questions": 27,
+        "commit_questions": 24,
+        "recorded_latency_ms": 2533,
+        "recorded_input_tokens": 7154
+      },
+      {
+        "body_id": 5,
+        "run": 3,
+        "decision_index": 4,
+        "operation_in_run": "TYPE_TEXT",
+        "questions": 27,
+        "commit_questions": 24,
+        "recorded_latency_ms": 5113,
+        "recorded_input_tokens": 7226
+      },
+      {
+        "body_id": 6,
+        "run": 4,
+        "decision_index": 7,
+        "operation_in_run": "CLICK",
+        "questions": 28,
+        "commit_questions": 25,
+        "recorded_latency_ms": 2733,
+        "recorded_input_tokens": 7512
+      },
+      {
+        "body_id": 7,
+        "run": 4,
+        "decision_index": 14,
+        "operation_in_run": "WAIT",
+        "questions": 40,
+        "commit_questions": 37,
+        "recorded_latency_ms": 3058,
+        "recorded_input_tokens": 10330
+      },
+      {
+        "body_id": 8,
+        "run": 5,
+        "decision_index": 11,
+        "operation_in_run": "CLICK",
+        "questions": 51,
+        "commit_questions": 48,
+        "recorded_latency_ms": 6260,
+        "recorded_input_tokens": 14798
+      },
+      {
+        "body_id": 9,
+        "run": 6,
+        "decision_index": 15,
+        "operation_in_run": "DONE",
+        "questions": 52,
+        "commit_questions": 49,
+        "recorded_latency_ms": 4675,
+        "recorded_input_tokens": 14669
+      }
+    ],
+    "pairs": [
+      {
+        "body_id": 1,
+        "commit_questions": 51,
+        "with_ms": 5454.3,
+        "without_ms": 4478.2,
+        "with_first": false,
+        "with_input": 15174,
+        "without_input": 8226,
+        "with_output": 1481,
+        "without_output": 520
+      },
+      {
+        "body_id": 2,
+        "commit_questions": 28,
+        "with_ms": 3344.9,
+        "without_ms": 3096.9,
+        "with_first": true,
+        "with_input": 8039,
+        "without_input": 4533,
+        "with_output": 868,
+        "without_output": 344
+      },
+      {
+        "body_id": 3,
+        "commit_questions": 47,
+        "with_ms": 3425.8,
+        "without_ms": 3698.0,
+        "with_first": false,
+        "with_input": 13047,
+        "without_input": 6802,
+        "with_output": 1355,
+        "without_output": 470
+      },
+      {
+        "body_id": 4,
+        "commit_questions": 24,
+        "with_ms": 4225.9,
+        "without_ms": 3029.6,
+        "with_first": true,
+        "with_input": 7154,
+        "without_input": 4150,
+        "with_output": 753,
+        "without_output": 305
+      },
+      {
+        "body_id": 5,
+        "commit_questions": 24,
+        "with_ms": 2948.7,
+        "without_ms": 2744.8,
+        "with_first": false,
+        "with_input": 7226,
+        "without_input": 4222,
+        "with_output": 753,
+        "without_output": 305
+      },
+      {
+        "body_id": 6,
+        "commit_questions": 25,
+        "with_ms": 3614.7,
+        "without_ms": 3618.0,
+        "with_first": true,
+        "with_input": 7512,
+        "without_input": 4382,
+        "with_output": 779,
+        "without_output": 312
+      },
+      {
+        "body_id": 7,
+        "commit_questions": 37,
+        "with_ms": 3973.3,
+        "without_ms": 3691.6,
+        "with_first": false,
+        "with_input": 10330,
+        "without_input": 5690,
+        "with_output": 1103,
+        "without_output": 408
+      },
+      {
+        "body_id": 8,
+        "commit_questions": 48,
+        "with_ms": 3597.0,
+        "without_ms": 4447.2,
+        "with_first": true,
+        "with_input": 14798,
+        "without_input": 8031,
+        "with_output": 1382,
+        "without_output": 478
+      },
+      {
+        "body_id": 9,
+        "commit_questions": 49,
+        "with_ms": 3831.0,
+        "without_ms": 2936.9,
+        "with_first": false,
+        "with_input": 14669,
+        "without_input": 7992,
+        "with_output": 1427,
+        "without_output": 504
+      }
+    ],
+    "requests": [
+      {
+        "seq": 1,
+        "body_id": 0,
+        "version": "with",
+        "questions_sent": 28,
+        "wall_ms": 3809.6,
+        "error": "Refused: post_json wanted a retry after HTTP 529; refused (budget)",
+        "http_status": 529
+      },
+      {
+        "seq": 2,
+        "body_id": 0,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 1773.5,
+        "input_tokens": 4180,
+        "output_tokens": 320,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 3,
+        "body_id": 1,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 4478.2,
+        "input_tokens": 8226,
+        "output_tokens": 520,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 4,
+        "body_id": 1,
+        "version": "with",
+        "questions_sent": 54,
+        "wall_ms": 5454.3,
+        "input_tokens": 15174,
+        "output_tokens": 1481,
+        "model": "jev-1.13.0",
+        "answers": 54,
+        "http_status": 200
+      },
+      {
+        "seq": 5,
+        "body_id": 2,
+        "version": "with",
+        "questions_sent": 31,
+        "wall_ms": 3344.9,
+        "input_tokens": 8039,
+        "output_tokens": 868,
+        "model": "jev-1.13.0",
+        "answers": 31,
+        "http_status": 200
+      },
+      {
+        "seq": 6,
+        "body_id": 2,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 3096.9,
+        "input_tokens": 4533,
+        "output_tokens": 344,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 7,
+        "body_id": 3,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 3698.0,
+        "input_tokens": 6802,
+        "output_tokens": 470,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 8,
+        "body_id": 3,
+        "version": "with",
+        "questions_sent": 50,
+        "wall_ms": 3425.8,
+        "input_tokens": 13047,
+        "output_tokens": 1355,
+        "model": "jev-1.13.0",
+        "answers": 50,
+        "http_status": 200
+      },
+      {
+        "seq": 9,
+        "body_id": 4,
+        "version": "with",
+        "questions_sent": 27,
+        "wall_ms": 4225.9,
+        "input_tokens": 7154,
+        "output_tokens": 753,
+        "model": "jev-1.13.0",
+        "answers": 27,
+        "http_status": 200
+      },
+      {
+        "seq": 10,
+        "body_id": 4,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 3029.6,
+        "input_tokens": 4150,
+        "output_tokens": 305,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 11,
+        "body_id": 5,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 2744.8,
+        "input_tokens": 4222,
+        "output_tokens": 305,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 12,
+        "body_id": 5,
+        "version": "with",
+        "questions_sent": 27,
+        "wall_ms": 2948.7,
+        "input_tokens": 7226,
+        "output_tokens": 753,
+        "model": "jev-1.13.0",
+        "answers": 27,
+        "http_status": 200
+      },
+      {
+        "seq": 13,
+        "body_id": 6,
+        "version": "with",
+        "questions_sent": 28,
+        "wall_ms": 3614.7,
+        "input_tokens": 7512,
+        "output_tokens": 779,
+        "model": "jev-1.13.0",
+        "answers": 28,
+        "http_status": 200
+      },
+      {
+        "seq": 14,
+        "body_id": 6,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 3618.0,
+        "input_tokens": 4382,
+        "output_tokens": 312,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 15,
+        "body_id": 7,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 3691.6,
+        "input_tokens": 5690,
+        "output_tokens": 408,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 16,
+        "body_id": 7,
+        "version": "with",
+        "questions_sent": 40,
+        "wall_ms": 3973.3,
+        "input_tokens": 10330,
+        "output_tokens": 1103,
+        "model": "jev-1.13.0",
+        "answers": 40,
+        "http_status": 200
+      },
+      {
+        "seq": 17,
+        "body_id": 8,
+        "version": "with",
+        "questions_sent": 51,
+        "wall_ms": 3597.0,
+        "input_tokens": 14798,
+        "output_tokens": 1382,
+        "model": "jev-1.13.0",
+        "answers": 51,
+        "http_status": 200
+      },
+      {
+        "seq": 18,
+        "body_id": 8,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 4447.2,
+        "input_tokens": 8031,
+        "output_tokens": 478,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 19,
+        "body_id": 9,
+        "version": "without",
+        "questions_sent": 3,
+        "wall_ms": 2936.9,
+        "input_tokens": 7992,
+        "output_tokens": 504,
+        "model": "jev-1.13.0",
+        "answers": 3,
+        "http_status": 200
+      },
+      {
+        "seq": 20,
+        "body_id": 9,
+        "version": "with",
+        "questions_sent": 52,
+        "wall_ms": 3831.0,
+        "input_tokens": 14669,
+        "output_tokens": 1427,
+        "model": "jev-1.13.0",
+        "answers": 52,
+        "http_status": 200
+      },
+      {
+        "seq": 21,
+        "body_id": null,
+        "version": "one_question",
+        "questions_sent": 1,
+        "wall_ms": 5161.0,
+        "input_tokens": 322,
+        "output_tokens": 31,
+        "model": "jev-1.13.0",
+        "answers": 1,
+        "http_status": 200
+      },
+      {
+        "seq": 22,
+        "body_id": null,
+        "version": "one_question",
+        "questions_sent": 1,
+        "wall_ms": 4094.9,
+        "input_tokens": 322,
+        "output_tokens": 31,
+        "model": "jev-1.13.0",
+        "answers": 1,
+        "http_status": 200
+      },
+      {
+        "seq": 23,
+        "body_id": null,
+        "version": "one_question",
+        "questions_sent": 1,
+        "wall_ms": 4663.0,
+        "input_tokens": 322,
+        "output_tokens": 31,
+        "model": "jev-1.13.0",
+        "answers": 1,
+        "http_status": 200
+      },
+      {
+        "seq": 24,
+        "body_id": null,
+        "version": "one_question",
+        "questions_sent": 1,
+        "wall_ms": 4420.6,
+        "input_tokens": 322,
+        "output_tokens": 31,
+        "model": "jev-1.13.0",
+        "answers": 1,
+        "http_status": 200
+      },
+      {
+        "seq": 25,
+        "body_id": null,
+        "version": "one_question",
+        "questions_sent": 1,
+        "wall_ms": 2092.8,
+        "input_tokens": 322,
+        "output_tokens": 31,
+        "model": "jev-1.13.0",
+        "answers": 1,
+        "http_status": 200
+      }
+    ],
+    "one_question_ms": [
+      5161.0,
+      4094.9,
+      4663.0,
+      4420.6,
+      2092.8
+    ],
+    "median_one_question_ms": 4420.6,
+    "one_question_request": {
+      "questions": 1,
+      "input_tokens": 322,
+      "output_tokens": 31
+    },
+    "pairs_slower_with_commit_questions": 6,
+    "commit_question_latency_effect": "not resolved (paired median +0.25 s, 6 of 9 pairs slower, range −0.85 to +1.2 s); input tokens +82%",
+    "one_question_vs_full": "1-question requests were no faster (median 4.4 s vs 3.6 s for full requests)"
+  },
+  "runs": [
+    {
+      "n": 1,
+      "arm": "untraced",
+      "elapsed_ms": 185271,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 17,
+      "executed_steps": 10,
+      "stale_decisions": 6,
+      "operations": {
+        "CLICK": 10,
+        "DONE": 2,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 164269,
+        "input_median_per_request": 7684,
+        "output_total": 16340
+      },
+      "decision_latency_ms": {
+        "median": 8495,
+        "total": 177603
+      },
+      "max_commit_probability_consumed": 0.05,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 876,
+          "cost": 2.637e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 5004,
+          "cost": 2.879e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "leftover_ms": 22.3
+    },
+    {
+      "n": 2,
+      "arm": "traced",
+      "elapsed_ms": 64003,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 16,
+      "executed_steps": 10,
+      "stale_decisions": 5,
+      "operations": {
+        "CLICK": 10,
+        "DONE": 1,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 149585,
+        "input_median_per_request": 7602.5,
+        "output_total": 14913
+      },
+      "decision_latency_ms": {
+        "median": 3147.0,
+        "total": 60636
+      },
+      "max_commit_probability_consumed": 0.05,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 848,
+          "cost": 2.466e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 746,
+          "cost": 3.299e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "run_file": {
+        "bytes": 568068,
+        "parses": true,
+        "attempt": null,
+        "status": "done",
+        "final_choice": "DONE",
+        "decisions": 16,
+        "history_steps": 10,
+        "matches_state": true,
+        "passed": true
+      },
+      "saves_in_timed_window": [
+        28,
+        30
+      ],
+      "leftover_ms": 162.8
+    },
+    {
+      "n": 3,
+      "arm": "untraced",
+      "elapsed_ms": 68122,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 16,
+      "executed_steps": 10,
+      "stale_decisions": 5,
+      "operations": {
+        "CLICK": 10,
+        "DONE": 1,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 149585,
+        "input_median_per_request": 7602.5,
+        "output_total": 14913
+      },
+      "decision_latency_ms": {
+        "median": 3128.0,
+        "total": 64431
+      },
+      "max_commit_probability_consumed": 0.05,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 1340,
+          "cost": 2.616e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 685,
+          "cost": 3.031e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "leftover_ms": 19.8
+    },
+    {
+      "n": 4,
+      "arm": "traced",
+      "elapsed_ms": 65655,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 16,
+      "executed_steps": 10,
+      "stale_decisions": 5,
+      "operations": {
+        "CLICK": 10,
+        "DONE": 1,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 149585,
+        "input_median_per_request": 7602.5,
+        "output_total": 14913
+      },
+      "decision_latency_ms": {
+        "median": 3740.0,
+        "total": 61921
+      },
+      "max_commit_probability_consumed": 0.04,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 1235,
+          "cost": 2.825e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 619,
+          "cost": 3.303e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "run_file": {
+        "bytes": 568230,
+        "parses": true,
+        "attempt": null,
+        "status": "done",
+        "final_choice": "DONE",
+        "decisions": 16,
+        "history_steps": 10,
+        "matches_state": true,
+        "passed": true
+      },
+      "saves_in_timed_window": [
+        28,
+        30
+      ],
+      "leftover_ms": 163.0
+    },
+    {
+      "n": 5,
+      "arm": "untraced",
+      "elapsed_ms": 81779,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 16,
+      "executed_steps": 10,
+      "stale_decisions": 5,
+      "operations": {
+        "CLICK": 10,
+        "DONE": 1,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 149585,
+        "input_median_per_request": 7602.5,
+        "output_total": 14913
+      },
+      "decision_latency_ms": {
+        "median": 4151.5,
+        "total": 78450
+      },
+      "max_commit_probability_consumed": 0.05,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 839,
+          "cost": 2.541e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 699,
+          "cost": 3.029e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "leftover_ms": 23.2
+    },
+    {
+      "n": 6,
+      "arm": "traced",
+      "elapsed_ms": 139398,
+      "status": "done",
+      "verification": {
+        "passed": true,
+        "failed_checks": [],
+        "checks": {
+          "search_page": true,
+          "one_way": true,
+          "origin": true,
+          "destination": true,
+          "date": true,
+          "year": true,
+          "results": true
+        },
+        "visible_flights": 3
+      },
+      "error": null,
+      "requests": 17,
+      "executed_steps": 10,
+      "stale_decisions": 6,
+      "operations": {
+        "CLICK": 11,
+        "DONE": 1,
+        "TYPE_TEXT": 3,
+        "WAIT": 2
+      },
+      "tokens": {
+        "input_total": 153000,
+        "input_median_per_request": 7713,
+        "output_total": 15254
+      },
+      "decision_latency_ms": {
+        "median": 5404,
+        "total": 135967
+      },
+      "max_commit_probability_consumed": 0.05,
+      "text_calls": [
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where from?",
+          "value": "Zurich",
+          "latency_ms": 809,
+          "cost": 2.603e-05
+        },
+        {
+          "model": "inception/mercury-2.5",
+          "field": "Where to? ",
+          "value": "London",
+          "latency_ms": 673,
+          "cost": 2.758e-05
+        }
+      ],
+      "source_hashes": {
+        "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+        "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+        "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+        "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+        "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+        "agent.py": "8fb85a75cd67e5144d3836790eed8193862ab3f426be27596fe484db0a496b9c",
+        "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+        "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+      },
+      "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+      "configuration": {
+        "TYPESAFE_MODEL": "jev-latest",
+        "TEXT_MODEL": "inception/mercury-2.5",
+        "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+        "TEXT_MODEL_REASONING": "none"
+      },
+      "decision_models": [
+        "jev-1.13.0"
+      ],
+      "browser_version": "Chrome/153.0.8010.48",
+      "run_file": {
+        "bytes": 580165,
+        "parses": true,
+        "attempt": null,
+        "status": "done",
+        "final_choice": "DONE",
+        "decisions": 17,
+        "history_steps": 10,
+        "matches_state": true,
+        "passed": true
+      },
+      "saves_in_timed_window": [
+        30,
+        32
+      ],
+      "leftover_ms": 174.2
+    }
+  ],
+  "superseded_series": {
+    "reason": "Run-file defect: a stale-dropped step left its pre-input attempt in run.json and the stop did not save, so traced run files ended with a non-null attempt and without the final DONE decision.",
+    "artifacts": "artifacts/measurements/2026-09-24",
+    "scope": "Three alternating untraced/traced pairs, untraced first, of one task in one existing Chrome profile. Each run opens and closes its own background tab. All six attempts are included; none was re-run. Timing: first prediction after the initial homepage observation through the accepted DONE; setup and the independent post-run verification are excluded. The traced arm passes trace_path, so Agent.save() writes run.json twice per executed step.",
+    "summary": {
+      "untraced": {
+        "runs": 3,
+        "passed": 3,
+        "median_ms": 57886
+      },
+      "traced": {
+        "runs": 3,
+        "passed": 3,
+        "median_ms": 53088
+      },
+      "gate": {
+        "rule": "traced median elapsed_ms within 10% of untraced median",
+        "traced_vs_untraced_percent": -8.3,
+        "within_10_percent": true
+      },
+      "tokens": {
+        "requests": 100,
+        "median_input_per_request": 7602.5,
+        "mean_input_per_request": 9231,
+        "mean_output_per_request": 917,
+        "median_questions_per_request": 28.0,
+        "median_commit_questions_per_request": 25.0,
+        "median_commit_share_of_request_characters": 0.537,
+        "recorded_run": {
+          "departure": "2026-09-20",
+          "requests": 17,
+          "input_tokens": 90558,
+          "output_tokens": 6325,
+          "decision_median_ms": 178,
+          "elapsed_ms": 7073,
+          "mean_input_per_request": 5327,
+          "mean_output_per_request": 372
+        },
+        "mean_input_per_request_change_percent": 73.3
+      },
+      "decision_latency_ms": {
+        "median": 2720.0,
+        "recorded_run_median": 178,
+        "median_for_requests_with_at_most_15_questions": 2454.0,
+        "fewest_questions": 5,
+        "latencies_at_fewest_questions": [
+          2442,
+          2600
+        ]
+      },
+      "save_microbenchmark": {
+        "source": "artifacts/measurements/2026-09-24/run6-traced/run.json",
+        "bytes": 501932,
+        "iterations": 200,
+        "write_ms_median_min_max": [
+          1.434,
+          1.389,
+          1.859
+        ],
+        "agent_save_ms_median_min_max": [
+          1.48,
+          1.425,
+          2.051
+        ],
+        "same_bytes": true
+      },
+      "run_file_finding": "In all three traced runs run.json ends with attempt set to an unexecuted step-11 WAIT and lacks the final DONE decision. The WAIT's pre-input save ran, Browser.act then raised StalePage, and the in-memory attempt was cleared without another save; DONE does not save. history matches state.json. run_goal's finish() saves once more, so MCP run files end with attempt null."
+    },
+    "runs": [
+      {
+        "n": 1,
+        "arm": "untraced",
+        "elapsed_ms": 71914,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 19,
+        "executed_steps": 10,
+        "stale_decisions": 8,
+        "operations": {
+          "BLOCKED": 1,
+          "CLICK": 10,
+          "DONE": 3,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 178638,
+          "input_median_per_request": 7684,
+          "output_total": 17646
+        },
+        "decision_latency_ms": {
+          "median": 2981,
+          "total": 68127
+        },
+        "max_commit_probability_consumed": 0.05,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 1321,
+            "cost": 3.462e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 695,
+            "cost": 3.357e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48"
+      },
+      {
+        "n": 2,
+        "arm": "traced",
+        "elapsed_ms": 53088,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 17,
+        "executed_steps": 10,
+        "stale_decisions": 6,
+        "operations": {
+          "BLOCKED": 1,
+          "CLICK": 10,
+          "DONE": 1,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 148780,
+          "input_median_per_request": 7521,
+          "output_total": 14738
+        },
+        "decision_latency_ms": {
+          "median": 2599,
+          "total": 49900
+        },
+        "max_commit_probability_consumed": 0.05,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 1047,
+            "cost": 2.922e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 608,
+            "cost": 3.237e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48",
+        "run_file": {
+          "bytes": 491743,
+          "parses": true,
+          "attempt": {
+            "step": 11,
+            "action": "Wait for the page to update",
+            "kind": "wait",
+            "target": null,
+            "text": null
+          },
+          "history_steps": 10,
+          "matches_state_history_steps": true,
+          "decisions": 16,
+          "status": "predicted"
+        }
+      },
+      {
+        "n": 3,
+        "arm": "untraced",
+        "elapsed_ms": 57886,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 16,
+        "executed_steps": 10,
+        "stale_decisions": 5,
+        "operations": {
+          "CLICK": 10,
+          "DONE": 1,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 146959,
+          "input_median_per_request": 7602.5,
+          "output_total": 14589
+        },
+        "decision_latency_ms": {
+          "median": 3044.5,
+          "total": 54465
+        },
+        "max_commit_probability_consumed": 0.05,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 1010,
+            "cost": 2.631e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 769,
+            "cost": 3.234e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48"
+      },
+      {
+        "n": 4,
+        "arm": "traced",
+        "elapsed_ms": 55478,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 16,
+        "executed_steps": 10,
+        "stale_decisions": 5,
+        "operations": {
+          "CLICK": 10,
+          "DONE": 1,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 149585,
+          "input_median_per_request": 7602.5,
+          "output_total": 14913
+        },
+        "decision_latency_ms": {
+          "median": 2722.5,
+          "total": 51380
+        },
+        "max_commit_probability_consumed": 0.04,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 827,
+            "cost": 2.701e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 1340,
+            "cost": 3.299e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48",
+        "run_file": {
+          "bytes": 501798,
+          "parses": true,
+          "attempt": {
+            "step": 11,
+            "action": "Wait for the page to update",
+            "kind": "wait",
+            "target": null,
+            "text": null
+          },
+          "history_steps": 10,
+          "matches_state_history_steps": true,
+          "decisions": 15,
+          "status": "predicted"
+        }
+      },
+      {
+        "n": 5,
+        "arm": "untraced",
+        "elapsed_ms": 54543,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 16,
+        "executed_steps": 10,
+        "stale_decisions": 5,
+        "operations": {
+          "CLICK": 10,
+          "DONE": 1,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 149585,
+          "input_median_per_request": 7602.5,
+          "output_total": 14913
+        },
+        "decision_latency_ms": {
+          "median": 2482.0,
+          "total": 51173
+        },
+        "max_commit_probability_consumed": 0.05,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 925,
+            "cost": 2.581e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 683,
+            "cost": 2.844e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48"
+      },
+      {
+        "n": 6,
+        "arm": "traced",
+        "elapsed_ms": 52224,
+        "status": "done",
+        "verification": {
+          "passed": true,
+          "failed_checks": [],
+          "checks": {
+            "search_page": true,
+            "one_way": true,
+            "origin": true,
+            "destination": true,
+            "date": true,
+            "year": true,
+            "results": true
+          },
+          "visible_flights": 3
+        },
+        "error": null,
+        "requests": 16,
+        "executed_steps": 10,
+        "stale_decisions": 5,
+        "operations": {
+          "CLICK": 10,
+          "DONE": 1,
+          "TYPE_TEXT": 3,
+          "WAIT": 2
+        },
+        "tokens": {
+          "input_total": 149585,
+          "input_median_per_request": 7602.5,
+          "output_total": 14913
+        },
+        "decision_latency_ms": {
+          "median": 2926.0,
+          "total": 48996
+        },
+        "max_commit_probability_consumed": 0.05,
+        "text_calls": [
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where from?",
+            "value": "Zurich",
+            "latency_ms": 639,
+            "cost": 2.706e-05
+          },
+          {
+            "model": "inception/mercury-2.5",
+            "field": "Where to? ",
+            "value": "London",
+            "latency_ms": 748,
+            "cost": 3.144e-05
+          }
+        ],
+        "source_hashes": {
+          "questions.py": "cccebf1fe49b91c3a1b5178a29a0e05e28abdce02cd9b81e27b05ecf40f95079",
+          "__init__.py": "60f025b8d24465e2c0f7a3547d43b8020fd8843de7b6cb3f892ef63f5548cf63",
+          "model.py": "f0339487cc650f984a38107eed119dcb08bc2ea842db9ec7bfc5425d23a39b08",
+          "browser.py": "2574266b3febb2dc7df7f7de67535762d69824d5203adc7d73e28ddf6e1b20f7",
+          "snapshot.js": "e50473501c8fb8e70f3b21866d987393e3f2315c639d638bd477d170e81ed78d",
+          "agent.py": "fcfcd66f7d8c5096c937965ffff1cbf2f0798967f2e75f4c652013e843f4000d",
+          "demo.py": "46767540cf42ace91acae80671027735ea69bab693dfb21b2b8c58d14215408d",
+          "mcp_server.py": "40a087f84eb08b80d6bc68c8294ffe66eab3a4d7a33582923ed2445fd659e9ee"
+        },
+        "task_hash": "937f7ab0e450cf814770e6bba4b428896ddb20cc0a39f7a27c24ad06c3c58d92",
+        "configuration": {
+          "TYPESAFE_MODEL": "jev-latest",
+          "TEXT_MODEL": "inception/mercury-2.5",
+          "TEXT_MODEL_BASE_URL": "https://openrouter.ai/api/v1",
+          "TEXT_MODEL_REASONING": "none"
+        },
+        "decision_models": [
+          "jev-1.13.0"
+        ],
+        "browser_version": "Chrome/153.0.8010.48",
+        "run_file": {
+          "bytes": 501932,
+          "parses": true,
+          "attempt": {
+            "step": 11,
+            "action": "Wait for the page to update",
+            "kind": "wait",
+            "target": null,
+            "text": null
+          },
+          "history_steps": 10,
+          "matches_state_history_steps": true,
+          "decisions": 15,
+          "status": "predicted"
+        }
+      }
+    ]
+  },
+  "source_hashes_scope": "source_hashes covers jev_ultrafast/ only. The verifier (examples/flights.py) and the harness (scripts/measure_flights.py) are unhashed 2026-09-24 working-tree versions; since the runs, the harness changed only to omit trace_path when untraced, and today's verify() reproduces all six verdicts.",
+  "verify_reproduced": {
+    "runs": 6,
+    "same_verdict_and_checks": 6
+  }
+}

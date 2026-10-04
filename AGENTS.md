@@ -3,6 +3,7 @@
 Read README.md before editing. Keep the loop small: page -> indexed elements -> operation + target -> execution.
 
 - The input is one natural-language goal. Do not add site-specific plans or hardcoded field values.
+- Site notes for Claude are allowed (`docs/failure-review.md`); the executor never takes site-specific plans.
 - TypeSafe chooses an operation and operation-specific target heads in one request. Consume only the selected operation's target.
 - Targets must map to observed elements and supported operations. Never let the model emit selectors or executable code.
 - TYPE_TEXT invokes the text LLM. Cache a stale retry's value only while its entire helper input is identical.

@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import COMMIT, COMMIT_CRITERIA, NEXT_ACTION, TARGET, TEXT_VALUE
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
@@ -45,6 +45,22 @@ def validate_choice(answer, ids):
     return answer
 
 
+def validate_noul(answer):
+    try:
+        value = answer["noul"]
+        valid = type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+    except (KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise ValueError("Invalid TypeSafe response; no action executed.")
+    return value
+
+
+def commit_question(target):
+    """Question id for one target's commit judgment. SELECT keys such as 5:2 become commit_5_2."""
+    return "commit_" + target.replace(":", "_")
+
+
 def action_space(actions):
     """One index per observed element; each operation has its own valid target choices."""
     elements, indices, targets, controls = [], {}, {}, {}
@@ -79,6 +95,9 @@ def action_space(actions):
 
 
 def choose(state, goal, history):
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        raise ValueError("TYPESAFE_API_KEY is not set; add it to .env. No action executed.")
     elements, targets, controls = action_space(state["actions"])
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
@@ -104,6 +123,14 @@ def choose(state, goal, history):
             },
             "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
         }
+    # Speculative commit judgments in the same request. Only the chosen target's answer is consumed.
+    for kind in ("CLICK", "SELECT"):
+        for target, action in targets.get(kind, {}).items():
+            questions[commit_question(target)] = {
+                "type": "noul",
+                "instructions": COMMIT.format(element=f"[{target}] {action['label']}"),
+                "criteria": COMMIT_CRITERIA,
+            }
     body = {
         "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
         "state": {
@@ -116,7 +143,7 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    result = post_json("https://api.typesafe.ai/v1/systemone", key, body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -131,10 +158,15 @@ def choose(state, goal, history):
     else:
         choice = controls[operation]["id"] if operation in controls else operation
         probabilities[choice] = operation_answer["probabilities"][operation]
+    # Only a CLICK or SELECT can commit; an unused answer is never validated or consumed.
+    commit_probability = 0
+    if operation in {"CLICK", "SELECT"}:
+        commit_probability = validate_noul(result["answers"].get(commit_question(target), {}))
     return {
         "choice": choice,
         "operation": operation,
         "target": target,
+        "commit_probability": commit_probability,
         "confidence": operation_answer["confidence"],
         "probabilities": probabilities,
         "operation_probabilities": operation_answer["probabilities"],
@@ -187,10 +219,15 @@ def field_text(context):
     try:
         output = json.loads(result["choices"][0]["message"]["content"])
         value = output["text"]
-        if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        # An exact {"text": null} means the goal lacks this value, which Claude can supply; anything else is invalid.
+        if output != {"text": None} and (
+            set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000
+        ):
             raise ValueError()
     except (ValueError, KeyError, TypeError):
         raise ValueError("Text helper returned no valid field value; nothing typed.") from None
+    if value is None:
+        raise ValueError(f"The goal gives no value for '{context['field']['label']}'; nothing typed.")
     return value, {
         "model": model,
         "latency_ms": round((time.perf_counter() - started) * 1000),

@@ -699,34 +699,16 @@ textarea:focus-visible {
   outline: 2px solid #2f8a60;
   outline-offset: 0;
 }
-.plan {
+.goal {
   padding: 0 20px 16px;
-  display: grid;
-  gap: 6px;
-}
-.plan-step {
-  display: flex;
-  gap: 9px;
   font-size: 10px;
-  color: #969d8e;
-}
-.plan-step span {
-  font:
-    10px ui-monospace,
-    monospace;
-  min-width: 12px;
-}
-.plan-step.current {
   color: #3c744f;
-}
-.plan-step.current span {
-  color: #dc6b36;
 }
 .task-row {
   align-items: center;
 }
 @media (max-width: 760px) {
-  .plan-step {
+  .goal {
     font-size: 13px;
   }
   .task-row {
