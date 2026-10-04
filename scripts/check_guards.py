@@ -1,8 +1,10 @@
 """Local-browser freshness/execution regressions. No model calls or external websites."""
 
+import argparse
+import os
 from urllib.parse import quote
 
-from jev_ultrafast.browser import Browser, StalePage
+from validation_lab import RuntimeGuard, configure_native
 
 HTML = """<!doctype html><title>Guard checks</title>
 <style>body{margin:30px}button{width:180px;height:50px}#outside{position:absolute;top:3000px}</style>
@@ -13,8 +15,19 @@ HTML = """<!doctype html><title>Guard checks</title>
 <select aria-label="Category"><option>All</option><option>Design</option></select>
 <p id="outside">Unrelated offscreen text</p>"""
 
+DIALOG_AND_POPUP = """<!doctype html><title>Dialog and pop-up checks</title>
+<button onclick="window.answer=confirm('Sure?')">Confirm</button>
+<a href="about:blank" target="_blank">Open</a>"""
+
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lab-manifest", required=True)
+    manifest = configure_native(parser.parse_args().lab_manifest)
+    RuntimeGuard(manifest).install()
+    os.chdir(manifest["state"])
+    from jev_ultrafast.browser import Browser, StalePage
+
     browser = Browser("data:text/html," + quote(HTML))
     passed = []
     try:
@@ -127,6 +140,27 @@ def main():
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")
+
+        browser.close()
+        browser = Browser("data:text/html," + quote(DIALOG_AND_POPUP))
+        page = browser.observe(screenshot=False)
+        confirm = next(a for a in page["actions"] if a["label"] == "Confirm")
+        try:
+            browser.act(confirm, page)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("An open dialog should block the click")
+        assert browser.dismiss_dialog()
+        page = browser.observe(screenshot=False)
+        assert browser.evaluate("window.answer") is False
+        passed.append("dialog dismissed without accepting")
+
+        link = next(a for a in page["actions"] if a["label"] == "Open")
+        browser.act(link, page)
+        assert browser.close_popups() == ["about:blank"]
+        assert browser.close_popups() == []
+        passed.append("pop-up tab closed and reported")
     finally:
         browser.close()
     print("\n".join(passed))

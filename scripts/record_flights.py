@@ -11,7 +11,7 @@ from pathlib import Path
 from browser_harness.helpers import drain_events
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from examples.flights import GOALS, URL, verify  # noqa: E402
+from examples.flights import FLIGHT_OPERATIONS, GOALS, URL, verify  # noqa: E402
 from jev_ultrafast import Agent  # noqa: E402
 
 folder = Path(sys.argv[1] if len(sys.argv) > 1 else "artifacts/flights/recorded")
@@ -21,7 +21,7 @@ source_hashes = {
     for p in (Path(__file__).resolve().parents[1] / "jev_ultrafast").iterdir()
     if p.suffix in {".py", ".js"}
 }
-agent = Agent(URL, GOALS)
+agent = Agent(URL, GOALS, allowed_operations=FLIGHT_OPERATIONS)
 (folder / "frames").mkdir(exist_ok=True)
 (folder / "frames" / "000000.jpg").write_bytes(
     base64.b64decode(agent.browser.call("Page.captureScreenshot", format="jpeg", quality=85)["data"])

@@ -1,21 +1,48 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
+import asyncio
 import base64
+import contextlib
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
-from .browser import Browser, StalePage
+from . import run_store
+from .browser import Browser, StalePage, UncertainAction
+from .contracts import (
+    TERMINAL_STATES,
+    InvalidDecision,
+    RunStopped,
+    operation_diagnostic,
+    operation_for,
+    validate_allowed_operations,
+    validate_goal,
+)
 from .model import action_space, choose, field_context, field_text
-from .questions import MAX_STEPS
+from .questions import COMMIT_THRESHOLD, MAX_STEPS
+
+# Delegated decision D16 (docs/executor-improvements.md §5): this many WAIT steps, each leaving the page unchanged, with
+# no visible progress between them, return the run to Claude, which decides what follows. Jev's WAIT is its "still
+# loading" answer. Visible progress is a read that differs from the one before, or a re-read that fails.
+WAITS_BEFORE_CLAUDE = 2
+EXECUTION_SECONDS = 90
+MAX_STALE_RECOVERIES = 120
 
 
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False):
-        task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
-        if not task:
-            raise ValueError("Supply a task")
-        plan = [task]
+    def __init__(
+        self, url, goals, *, allowed_operations, record_dir=None, screenshots=False, allowed_sites=None,
+        allow_commit=False, trace_path=None,
+    ):
+        policy = validate_allowed_operations(allowed_operations)
+        # Preserve the library's list-of-goals shorthand, validating it before browser setup too.
+        if isinstance(goals, list) and all(isinstance(goal, str) for goal in goals):
+            goals = "\n".join(goals)
+        task = validate_goal(goals)
+        setup_started = time.monotonic()
         self.pending_text = None
+        self.trace_path = trace_path
+        self.before_input = None  # optional stop check before each text call and input; raising skips them
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -24,97 +51,366 @@ class Agent:
         except Exception:
             self.browser.close()
             raise
-        self.state = dict(
-            browser=self.browser,
-            goal="\n".join(plan),
-            page=page,
-            decision=None,
-            history=[],
-            status="ready",
-            plan=plan,
-            plan_index=0,
-            decisions=[],
-            text_calls=[],
-            elapsed_ms=0,
-            started_at=None,
-            record=bool(self.record_dir),
-        )
+        self._fresh_state(task, page, allowed_sites, allow_commit, allowed_operations=list(policy))
+        self.state["setup_ms"] = round((time.monotonic() - setup_started) * 1000)
         if self.record_dir:
             self.record_dir.mkdir(parents=True, exist_ok=True)
             (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
 
+    def new_goal(self, goal, *, allowed_operations, allowed_sites=None, allow_commit=False, trace_path=None):
+        """Start a new run in the same tab: fresh counters and budgets, same browser and node identities."""
+        policy = validate_allowed_operations(allowed_operations)
+        task = validate_goal(goal)
+        setup_started = time.monotonic()
+        page = self.browser.observe(screenshot=self.screenshots)
+        self.pending_text = None
+        self.trace_path = trace_path
+        self._fresh_state(task, page, allowed_sites, allow_commit, allowed_operations=list(policy))
+        self.state["setup_ms"] = round((time.monotonic() - setup_started) * 1000)
+
+    def _fresh_state(self, goal, page, allowed_sites, allow_commit=False, *, allowed_operations):
+        self.allowed_operations = validate_allowed_operations(allowed_operations)
+        self.deadline = None
+        # The site boundary: the start page's site plus the sites the caller allows. "*" allows any site.
+        start = urlparse(page["url"]).hostname
+        sites = [start.removeprefix("www.")] if start else []
+        for site in allowed_sites or []:
+            host = "*" if site == "*" else urlparse(site if "://" in site else "//" + site).hostname
+            if host and host.removeprefix("www.") not in sites:
+                sites.append(host.removeprefix("www."))
+        self.state = dict(
+            browser=self.browser,
+            goal=goal,
+            page=page,
+            decision=None,
+            history=[],
+            outcome=[],
+            status="ready",
+            decisions=[],
+            text_calls=[],
+            stale_decisions=0,
+            stale_streak=0,
+            stale_recoveries=0,
+            stale_reason=None,
+            attempt=None,
+            allowed_sites=sites,
+            allow_commit=allow_commit,
+            allowed_operations=sorted(self.allowed_operations),
+            stop_code=None,
+            operation_refusal=None,
+            elapsed_ms=0,
+            started_at=None,
+            setup_ms=0,
+            record=bool(self.record_dir),
+            wait_streak=0,  # unchanged WAIT steps since the last visible progress; decision D16
+        )
+
     def snapshot(self):
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
-            "elements": action_space(self.state["page"]["actions"])[0],
+            "elements": action_space(self.state["page"]["actions"], self.allowed_operations,
+                                     evidence=self.state["page"].get("evidence", ()))[0],
         }
 
+    def save(self):
+        """Write the run file atomically. Without a trace_path this does nothing."""
+        if not self.trace_path:
+            return
+        try:
+            snapshot = self.snapshot()
+            snapshot["page"] = {k: v for k, v in snapshot["page"].items() if k != "screenshot"}
+            run_store.save_execution(self.trace_path, snapshot)
+        except Exception as error:
+            raise RuntimeError(f"Run file incomplete: {error}") from None
+
+    def mark_stopped(self, code):
+        self.state.update(status="stopped", stop_code=code, decision=None)
+        if self.state["started_at"] is not None:
+            self.state["elapsed_ms"] = round((time.perf_counter() - self.state["started_at"]) * 1000)
+        self.pending_text = None
+        with contextlib.suppress(Exception):
+            self.save()
+
+    def stop(self, code, message, *, cause=None):
+        self.mark_stopped(code)
+        raise RunStopped(code, message) from cause
+
+    def check_stop(self, *, terminal=True):
+        if terminal and self.state["status"] in TERMINAL_STATES:
+            raise RunStopped(self.state["stop_code"] or "terminal_state",
+                             "This run has stopped. Start a new goal with an explicit operation policy.")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.stop("execution_deadline", f"{EXECUTION_SECONDS} s budget reached")
+        if self.before_input:
+            try:
+                self.before_input()
+            except BaseException as error:
+                self.mark_stopped(error.code if isinstance(error, RunStopped) else
+                                  "cancelled" if isinstance(error, asyncio.CancelledError) else "external_stop")
+                raise
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self.stop("execution_deadline", f"{EXECUTION_SECONDS} s budget reached")
+
+    def remaining_budget(self):
+        self.check_stop()
+        remaining = self.deadline - time.monotonic() if self.deadline is not None else EXECUTION_SECONDS
+        if remaining <= 0:
+            self.stop("execution_deadline", f"{EXECUTION_SECONDS} s budget reached")
+        return remaining
+
+    def browser_read(self, method, *args, **kwargs):
+        self.check_stop()
+        result = method(*args, check_stop=self.check_stop, remaining_budget=self.remaining_budget, **kwargs)
+        self.check_stop()
+        return result
+
+    def model_call(self, function, *args, field=None):
+        """Account completed calls before checking a late response; pending values are installed only afterward."""
+        self.check_stop()
+        rows = self.state["decisions" if field is None else "text_calls"]
+        recorded = None
+        observed_url = self.state["page"].get("url")
+
+        def on_response(metadata):
+            nonlocal recorded
+            recorded = {"model": "unknown", "usage": {}, **metadata}
+            if field is None:
+                recorded = {
+                    "choice": None, "operation": None, "target": None, "confidence": None,
+                    "target_confidence": None, "probabilities": {}, "operation_probabilities": {},
+                    "target_probabilities": {}, "commit_probability": None,
+                    "fingerprint": self.state["page"]["fingerprint"],
+                    "omitted_actions": self.state["page"].get("omitted_actions", 0),
+                    "elapsed_ms": round((time.perf_counter() - self.state["started_at"]) * 1000), **recorded,
+                }
+            else:
+                recorded.update(field=field, value=None)
+            if field is None:
+                recorded["observed_url"] = observed_url
+            rows.append(recorded)
+
+        try:
+            result = function(*args, check_stop=self.check_stop, remaining_budget=self.remaining_budget,
+                              on_response=on_response)
+            metadata = result if field is None else result[1]
+            if recorded is None:  # Scripted providers still use the same accounting and post-response guard.
+                on_response(metadata)
+            else:
+                recorded.update(metadata)
+                if field is None:
+                    recorded["observed_url"] = observed_url
+            if field is not None:
+                recorded["value"] = result[0]
+            self.check_stop()
+        except BaseException:
+            if recorded is not None:
+                recorded["discarded"] = self.state["stop_code"] or "invalid_response"
+                with contextlib.suppress(Exception):
+                    self.save()
+            raise
+        return result
+
+    def check_operation(self, action, decision):
+        try:
+            actual = operation_for(action)
+        except (KeyError, TypeError, ValueError):
+            self.refuse_operation("The selected action has no supported observed operation.", decision)
+        if actual not in self.allowed_operations or decision.get("operation") != actual:
+            self.refuse_operation(f"Operation {actual} is not authorized by this goal or decision.", decision, actual)
+        _, targets, controls = action_space(self.state["page"]["actions"])
+        target = decision.get("target")
+        if actual in targets:
+            expected = targets[actual].get(target) if isinstance(target, str) else None
+        else:
+            expected = controls.get(actual) if target is None else None
+        if expected is not action:
+            self.refuse_operation("The selected target does not match its observed action.", decision, actual)
+        return actual
+
+    def refuse_operation(self, message, decision, actual=None):
+        self.state["operation_refusal"] = operation_diagnostic(decision, message, actual)
+        self.stop("operation_not_allowed", message)
+
     def command(self, name, body=None):
+        if self.state["status"] in TERMINAL_STATES:
+            self.check_stop()  # Terminal entry never starts a timer or calls an external callback.
+        if name not in {"tick", "predict", "act"}:
+            raise ValueError("Unknown command")
+        if self.deadline is None:
+            self.deadline = time.monotonic() + EXECUTION_SECONDS
+            self.state["started_at"] = time.perf_counter()
+        self.check_stop()
+        steps_before = len(self.state["history"])
+        try:
+            result = self._command(name, body)
+        except asyncio.CancelledError:
+            self.mark_stopped("cancelled")
+            raise
+        except Exception as error:
+            if (not isinstance(error, StalePage) and self.state["status"] not in TERMINAL_STATES
+                    and len(self.state["history"]) > steps_before):
+                self.mark_stopped("execution_error")
+            raise
+        # A late terminal answer or blocking call cannot override expiry/cancellation.
+        self.check_stop(terminal=False)
+        return result
+
+    def _command(self, name, body=None):
         body = body or {}
         state = self.state
+        if state["status"] in TERMINAL_STATES:
+            raise ValueError("This run has stopped. Start a new goal with an explicit operation policy.")
         if name == "tick":
+            steps, decisions = len(state["history"]), len(state["decisions"])
             try:
                 self.command("predict", {})
                 return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
-            except StalePage:
+            except StalePage as stale:
+                self.check_stop()
+                state["stale_recoveries"] += 1
+                state["stale_reason"] = str(stale)
+                if state["stale_recoveries"] >= MAX_STALE_RECOVERIES:
+                    self.stop("stale_recovery_limit", f"{MAX_STALE_RECOVERIES} stale outcomes: {stale}")
+                dropped = len(state["history"]) == steps and len(state["decisions"]) > decisions
+                if len(state["history"]) == steps:
+                    # Decisions dropped because the page changed before their input.
+                    state["stale_decisions"] += len(state["decisions"]) - decisions
+                if state["attempt"]:
+                    state["attempt"] = None  # StalePage is raised only before input, so nothing ran
+                    self.save()
                 state["decision"] = None
                 state["status"] = "ready"
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                unchanged = False
+                try:
+                    state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
+                    unchanged = dropped and state["page"]["fingerprint"] == state["decisions"][-1]["fingerprint"]
+                except StalePage:
+                    pass  # Still navigating: keep the old page; the next predict reads it again.
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                # Nothing ran and the page reads the same, so Jev would choose again: stop like unchanged actions.
+                state["stale_streak"] = state["stale_streak"] + 1 if unchanged else 0
+                if not unchanged:
+                    state["wait_streak"] = 0  # the page changed or is still navigating: visible progress (D16)
+                if state["stale_streak"] == 3:
+                    state["status"] = "blocked"
+                    raise ValueError(f"Three choices in a row went stale while the page read stayed the same: {stale}")
                 return self.snapshot()
         elif name == "predict":
             if not state["browser"]:
                 raise ValueError("Start a demo first")
             if state["started_at"] is None:
                 state["started_at"] = time.perf_counter()
-            if not state["browser"].fresh(state["page"]):
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+            if not self.browser_read(state["browser"].fresh, state["page"]):
+                previous = state["page"]["fingerprint"]
+                state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
+                if state["page"]["fingerprint"] != previous:
+                    state["wait_streak"] = 0  # the page changed since the last read: visible progress (D16)
             state["decision"] = None
             if state["status"] in {"done", "blocked"}:
                 raise ValueError("This run has stopped. Start a fresh demo.")
             if len(state["decisions"]) >= MAX_STEPS * 2:
+                state["status"] = "blocked"
                 raise ValueError("Reached the demo's model-call budget")
-            state["decision"] = choose(state["page"], state["goal"], state["history"])
-            state["decisions"].append(
-                {
-                    **state["decision"],
-                    "fingerprint": state["page"]["fingerprint"],
-                    "elapsed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
-                }
-            )
+            try:
+                state["decision"] = self.model_call(
+                    choose, state["page"], state["goal"], state["history"], self.allowed_operations,
+                )
+            except InvalidDecision as error:
+                state["operation_refusal"] = error.diagnostic
+                self.stop("operation_not_allowed", str(error))
             state["status"] = "predicted"
         elif name == "act":
             decision, page = state["decision"], state["page"]
-            if not decision or body.get("fingerprint") != page["fingerprint"]:
+            if decision is None or body.get("fingerprint") != page["fingerprint"]:
                 raise ValueError("Observe and choose before acting")
             # Consume once, before any mutation or model call. A retry cannot double-click.
             state["decision"] = None
+            if not isinstance(decision, dict) or not isinstance(decision.get("choice"), str):
+                self.refuse_operation("The selected action must be an observed action ID.", decision)
             selected = decision["choice"]
             if selected in {"DONE", "BLOCKED"}:
-                if not state["browser"].fresh(page):
+                if decision.get("operation") != selected or decision.get("target") is not None:
+                    self.refuse_operation("The terminal choice does not match its operation.", decision, selected)
+                if not self.browser_read(state["browser"].fresh, page):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
                 state["status"] = "done" if selected == "DONE" else "blocked"
-                state["plan_index"] = int(selected == "DONE")
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
-            action = next(a for a in page["actions"] if a["id"] == selected)
+            # Judge the site of the page this decision was made on, before any input or model call.
+            host = urlparse(page["url"]).hostname or ""
+            sites = state["allowed_sites"]
+            if "*" not in sites and not any(host == site or host.endswith("." + site) for site in sites):
+                state["status"] = "blocked"
+                raise ValueError(
+                    f"Left the allowed sites at {host or 'a page without a host'}; widen allowed_sites to continue."
+                )
+            action = next((a for a in page["actions"] if a["id"] == selected), None)
+            if action is None:
+                self.refuse_operation("The selected action was not observed on this page.", decision)
+            self.check_operation(action, decision)
+            # The commit boundary: stop before a step Jev judges irreversible, unless the goal's caller allowed it.
+            if not state["allow_commit"] and decision.get("commit_probability", 0) >= COMMIT_THRESHOLD:
+                state["status"] = "blocked"
+                raise ValueError(
+                    f"'{action['label']}' may pay, buy, book, send, delete, or change account settings; "
+                    "pass allow_commit if the user asked for it."
+                )
             if len(state["history"]) >= MAX_STEPS:
                 state["status"] = "blocked"
                 raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
             text, helper = None, None
             if action["kind"] == "fill":
-                if not state["browser"].fresh(page):
+                if not self.browser_read(state["browser"].fresh, page):
                     raise StalePage("Page changed before text generation. Choose again.")
                 context = field_context(state["goal"], action, page, state["history"])
                 if self.pending_text and self.pending_text[0] == context:
                     _, text, helper = self.pending_text
                 else:
-                    text, helper = field_text(context)
+                    text, helper = self.model_call(field_text, context, field=action["label"])
                     self.pending_text = (context, text, helper)
-                    state["text_calls"].append({**helper, "field": action["label"], "value": text})
+            self.check_stop()
+            self.check_operation(action, decision)
+            option_evidence = {}
+            if action["kind"] == "select" and action.get("option"):
+                option_evidence["option"] = dict(action["option"])
+            # Save the input about to happen, so a stop between input and logging still shows it.
+            state["attempt"] = {
+                "step": len(state["history"]) + 1,
+                "action": action["label"],
+                "kind": action["kind"],
+                "target": decision["target"],
+                "text": text,
+                "phase": "prepared",
+                "input_started": False,
+                **option_evidence,
+            }
+            self.save()
             # Browser.act checks freshness immediately before input, including after text generation.
-            state["browser"].act(action, page, text=text)
+            def record_phase(phase, input_started, *, persist=True):
+                state["attempt"].update(phase=phase, input_started=input_started)
+                if persist:
+                    self.save()
+
+            try:
+                state["browser"].act(action, page, text=text, check_stop=self.check_stop,
+                                     remaining_budget=self.remaining_budget, on_phase=record_phase)
+            except UncertainAction as error:
+                # Preserve the attempt: assignment or an event may already have happened before the reply was lost.
+                state["attempt"]["outcome"] = "uncertain"
+                self.stop("uncertain_action", str(error), cause=error)
+            except BaseException:
+                if not state["attempt"]["input_started"]:
+                    state["attempt"] = None
+                else:
+                    uncertain = state["attempt"]["phase"].endswith("_uncertain")
+                    if uncertain:
+                        state["attempt"]["outcome"] = "uncertain"
+                    if state["status"] not in TERMINAL_STATES:
+                        self.mark_stopped("uncertain_action" if uncertain else "execution_error")
+                with contextlib.suppress(Exception):
+                    self.save()
+                raise
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.
@@ -132,6 +428,7 @@ class Agent:
                     "text_latency_ms": helper["latency_ms"] if helper else 0,
                     "operation": decision["operation"],
                     "target": decision["target"],
+                    **option_evidence,
                     "page_changed": None,
                     "url": page["url"],
                     "usage": decision["usage"],
@@ -139,7 +436,11 @@ class Agent:
                     "elapsed_ms": state["elapsed_ms"],
                 }
             )
-            state["page"] = state["browser"].observe(screenshot=self.screenshots)
+            state["attempt"] = None
+            state["stale_streak"] = 0  # a step ran
+            self.save()
+            self.check_stop()
+            state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],
@@ -156,13 +457,27 @@ class Agent:
                 if len(repeated) == 3 and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
                 else "ready"
             )
+            # D16: a changed page restarts the count, a WAIT that changed nothing adds one, and other steps keep it.
+            if state["history"][-1]["page_changed"]:
+                state["wait_streak"] = 0
+            elif action["kind"] == "wait":
+                state["wait_streak"] += 1
+            if state["wait_streak"] == WAITS_BEFORE_CLAUDE:
+                state["status"] = "blocked"
+                raise ValueError("Jev judged the page still loading")
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
 
     def run(self):
-        while self.state["status"] not in {"done", "blocked"}:
-            yield self.command("tick")
+        try:
+            while self.state["status"] not in TERMINAL_STATES:
+                yield self.command("tick")
+        except BaseException:
+            with contextlib.suppress(Exception):  # a failed save must not hide the error that stopped the run
+                self.save()
+            raise
+        self.save()  # the stop: a library run's file ends complete, as run_goal's does
 
     def close(self):
         self.browser.close()

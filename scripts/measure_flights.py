@@ -12,6 +12,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument("--source", default=".")
 parser.add_argument("--output", required=True)
+parser.add_argument("--trace", action="store_true", help="also write the run file run_goal writes")
 args = parser.parse_args()
 source = Path(args.source).resolve()
 sys.path.insert(0, str(source))
@@ -19,7 +20,7 @@ from jev_ultrafast import Agent  # noqa: E402
 from jev_ultrafast import browser as browser_module  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from examples.flights import GOALS, URL, verify  # noqa: E402
+from examples.flights import FLIGHT_OPERATIONS, GOALS, URL, verify  # noqa: E402
 
 folder = Path(args.output)
 folder.mkdir(parents=True, exist_ok=False)
@@ -39,7 +40,9 @@ def timed(method, *positional, **kwargs):
 
 
 browser_module.cdp = timed
-agent = Agent(URL, GOALS)
+# The selected source must implement explicit policies; historical results retain their original provenance.
+agent = Agent(URL, GOALS, allowed_operations=FLIGHT_OPERATIONS,
+              **({"trace_path": folder / "run.json"} if args.trace else {}))
 # Setup is excluded in both arms, as in the original demo.
 calls.clear()
 error = None
