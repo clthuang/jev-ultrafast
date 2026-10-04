@@ -50,6 +50,7 @@ from copy import deepcopy  # noqa: E402
 import pytest  # noqa: E402
 
 from jev_ultrafast import review_records  # noqa: E402
+from scripts import report_runs  # noqa: E402
 
 RUN_A = '20261003-100000-0001'
 RUN_B = '20261003-100100-0002'
@@ -71,10 +72,44 @@ def write_run(run_id=RUN_A, **changes):
     return path
 
 
+def notes_bytes():
+    return site_notes.NOTES_PATH.read_bytes() if site_notes.NOTES_PATH.exists() else None
+
+
 @pytest.mark.parametrize('kind', ['batch', 'digest', 'attempt'])
-def test_unknown_record_versions_fail_closed(kind):
+def test_unknown_record_versions_fail_closed(kind, fake_paid, monkeypatch, capsys):
     with pytest.raises(review_records.RecordError):
         review_records.validate({'schema_version': 999}, kind)
+    # A real record of each kind, then the same record from a later version, through the readers that use it.
+    write_run()
+    batch = review_runs.prepare_batch()
+    if kind == 'batch':
+        path = review_runs.REVIEWS / 'batches' / f"{batch['batch_id']}.json"
+    elif kind == 'digest':
+        path, _ = apply_batch(batch)
+    else:
+        claim = review_runs.claim_attempt(review_runs.read_state(), 'once', batch, time.time())
+        path = review_runs.attempt_path(claim['attempt_id'])
+    record = json.loads(path.read_text())
+    path.write_text(json.dumps({**record, 'schema_version': 999}))
+    notes_before = notes_bytes()
+    capsys.readouterr()
+    if kind == 'batch':
+        with pytest.raises(review_records.RecordError):
+            review_runs.load_batch(batch['batch_id'])
+        monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(EMPTY_REPLY)))
+        assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+        assert not review_runs.committed_path(batch['batch_id']).exists()
+    elif kind == 'digest':
+        with pytest.raises(review_records.RecordError):
+            review_records.acknowledged(review_runs.REVIEWS)  # never a partial set of acknowledgments
+        assert review_runs.main(['queue']) == 1 and capsys.readouterr().out == ''
+    else:
+        assert review_runs.once_command(None) == 1 and fake_paid == []  # unreadable ownership: no paid launch
+    assert notes_bytes() == notes_before
+    report = '\n'.join(report_runs.review_lines(review_runs.REVIEWS, [], set(), set()))
+    if kind != 'batch':
+        assert f'skipped {path}: invalid review record' in capsys.readouterr().err and str(path) not in report
 
 
 def test_correction_changes_review_version():
@@ -117,11 +152,34 @@ def test_execution_clocks_do_not_change_review_version():
     assert review_records.run_versions(runs, {RUN_A: ['failed']}, {})[RUN_A] == version
 
 
-def test_attempt_records_never_acknowledge_items():
+def test_attempt_records_never_acknowledge_items(fake_paid, monkeypatch):
     attempts = review_runs.REVIEWS / 'attempts'
     attempts.mkdir(parents=True)
     (attempts / ('a' * 32 + '.json')).write_text(json.dumps({'queue': {'runs': [RUN_A]}}))
     assert review_records.acknowledged(review_runs.REVIEWS) == {'runs': {}, 'notes': {}}
+    (attempts / ('a' * 32 + '.json')).unlink()
+    # A real paid attempt that failed after sending RUN_A: membership is recorded, acknowledgment is not.
+    write_run()
+
+    def over_budget(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
+        fake_paid.append((text, budget))
+        process = SimpleNamespace(pid=12345)
+        before_spawn()
+        on_spawn(process)
+        on_exit(process)
+        return {}, {'subtype': 'error_max_budget_usd', 'is_error': True, 'result': 'over', 'total_cost_usd': 0.5}, None
+
+    monkeypatch.setattr(review_runs, 'launch', over_budget)
+    assert review_runs.once_command(None) == 1
+    [failed] = [review_records.read(path, 'attempt') for path in attempts.glob('*.json')]
+    assert failed['status'] == 'failed'
+    assert [item['id'] for item in failed['input_items'] if item['kind'] == 'runs'] == [RUN_A]
+    assert review_records.acknowledged(review_runs.REVIEWS) == {'runs': {}, 'notes': {}}
+    assert RUN_A in review_runs.build_queue()['runs']
+    # Even a forged success acknowledges nothing without a committed digest.
+    review_runs.save_attempt({**failed, 'status': 'succeeded', 'error': None})
+    assert review_records.acknowledged(review_runs.REVIEWS) == {'runs': {}, 'notes': {}}
+    assert RUN_A in review_runs.build_queue()['runs']
 
 
 EMPTY_REPLY = {'decisions': [], 'flags': [], 'proposals': [], 'summary': 'Reviewed'}
@@ -347,7 +405,7 @@ def test_storage_failure_acknowledges_nothing(monkeypatch):
 
 @pytest.mark.parametrize('boundary', ['before_notes', 'after_notes', 'notes_fsync', 'before_digest',
                                       'after_digest', 'before_cleanup', 'after_cleanup'])
-def test_crash_at_each_publication_boundary(monkeypatch, boundary):
+def test_crash_at_each_publication_boundary(monkeypatch, boundary, fake_paid):
     recovery()
     batch, reply = review_runs.prepare_batch(), {**EMPTY_REPLY, 'decisions': [add_decision()]}
     original, replace, fsync = store_io.publish, store_io.os.replace, store_io.fsync_directory
@@ -378,9 +436,22 @@ def test_crash_at_each_publication_boundary(monkeypatch, boundary):
     with pytest.raises(OSError):
         apply_batch(batch, reply)
     assert fired == [boundary]
+    digest_path = review_runs.committed_path(batch['batch_id'])
     if boundary == 'before_notes':
-        assert not site_notes.NOTES_PATH.exists()
+        assert not site_notes.NOTES_PATH.exists() and not digest_path.exists()
     else:
+        assert sum(note['runs'].get('recovered') == RUN_B for note in site_notes.load()[0]) == 1
+        # Past the commit point some authoritative evidence always survives the fault: the receipt, the digest,
+        # or both; a receipt is only ever cleared after its digest exists.
+        receipt = site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review']
+        expected = {'after_notes': (True, False), 'notes_fsync': (True, False), 'before_digest': (True, False),
+                    'after_digest': (True, True), 'before_cleanup': (True, True), 'after_cleanup': (False, True)}
+        assert (receipt is not None, digest_path.exists()) == expected[boundary]
+        # A paid dispatch recovers it first, then reviews only what is new: the note the decision added, never the
+        # acknowledged runs again, and never the committed decisions a second time.
+        assert review_runs.once_command(None) == 0
+        assert all(f'run {key} · queued' not in text for text, _ in fake_paid for key in (RUN_A, RUN_B))
+        assert digest_path.exists() and site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review'] is None
         assert sum(note['runs'].get('recovered') == RUN_B for note in site_notes.load()[0]) == 1
     monkeypatch.setattr(store_io, 'publish', original)
     monkeypatch.setattr(store_io, 'fsync_directory', fsync)
@@ -393,8 +464,8 @@ def test_crash_at_each_publication_boundary(monkeypatch, boundary):
     assert site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review'] is None
 
 
-def test_directory_fsync_failure_after_replace_never_replays(monkeypatch):
-    test_crash_at_each_publication_boundary(monkeypatch, 'notes_fsync')
+def test_directory_fsync_failure_after_replace_never_replays(monkeypatch, fake_paid):
+    test_crash_at_each_publication_boundary(monkeypatch, 'notes_fsync', fake_paid)
 
 
 def test_all_note_writers_preserve_pending_receipt(monkeypatch):
@@ -407,6 +478,7 @@ def test_all_note_writers_preserve_pending_receipt(monkeypatch):
     receipt = site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review']
     note_id = next(note['id'] for note in site_notes.load()[0] if note['runs'].get('recovered') == RUN_B)
     site_notes.record_shown([note_id])
+    site_notes.record_failure('example.com', 'covered_target', shown={note_id})
     site_notes.set_state(note_id, 'approve')
     site_notes.set_state(note_id, 'retire')
     site_notes.set_state(note_id, 'restore')
@@ -1103,3 +1175,123 @@ def test_naive_stored_times_are_read_as_local_times(monkeypatch):
     finally:
         monkeypatch.undo()
         time.tzset()
+
+
+import os  # noqa: E402
+import signal  # noqa: E402
+import subprocess  # noqa: E402
+
+from jev_ultrafast import review_processes  # noqa: E402
+
+
+def test_review_process_identity_is_precise_and_fails_closed():
+    current = review_processes.process_identity(os.getpid())
+    assert current == {'state': 'present', 'pid': os.getpid(), 'birth': current['birth'], 'uid': os.getuid(),
+                       'pgid': os.getpgid(0)}
+    assert current['birth'] and review_processes.process_identity(os.getpid()) == current
+    for pid in (0, 1, -5, '123', True, None):
+        assert review_processes.process_identity(pid) == {'state': 'unknown'}
+    child = subprocess.Popen(['node', '-e', 'setTimeout(()=>{}, 2000)'])  # the test guard allows node only
+    try:
+        alive = review_processes.process_identity(child.pid)
+        assert alive['state'] == 'present' and alive['pid'] == child.pid and alive['birth'] != current['birth']
+    finally:
+        child.kill()
+        child.wait(5)
+    assert review_processes.process_identity(child.pid) in ({'state': 'absent'}, {'state': 'unknown'}) or (
+        review_processes.process_identity(child.pid)['birth'] != alive['birth'])  # gone, or a different process
+
+
+def test_review_signals_are_guarded_by_reaping_and_birth_identity(monkeypatch):
+    signals = []
+    monkeypatch.setattr(review_runs.os, 'killpg', lambda pgid, sig: signals.append((pgid, sig)))
+    identity = {'state': 'present', 'pid': 4321, 'birth': '100:123', 'uid': os.getuid(), 'pgid': 4321}
+    process = SimpleNamespace(pid=4321, _review_identity=identity, _review_signal_lock=threading.RLock(),
+                              _review_reaped=False)
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: dict(identity))
+    assert review_runs.kill_group(process) is True and signals == [(4321, signal.SIGTERM)]
+    process._review_reaped = True  # reaped: its PID may already belong to another process
+    assert review_runs.kill_group(process, signal.SIGKILL) is False
+    process._review_reaped = False
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: {**identity, 'birth': '200:1'})  # reused PID
+    assert review_runs.kill_group(process, signal.SIGKILL) is False
+    monkeypatch.setattr(review_runs, 'process_identity', lambda pid: dict(identity))
+    process._review_identity = {**identity, 'pgid': 99}  # not the leader of its own group
+    assert review_runs.kill_group(process, signal.SIGKILL) is False
+    assert signals == [(4321, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize('reused', [False, True])
+def test_expired_child_is_signalled_only_after_identity_checks(fake_paid, monkeypatch, reused):
+    write_run()
+    started = time.time() - review_runs.REVIEW_TIMEOUT_MINUTES * 60 - 60  # its deadline has passed
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), started)
+    identity = {'state': 'present', 'pid': 12345, 'birth': '100:123', 'uid': os.getuid(), 'pgid': 12345}
+    claim.update(status='running', child={'pid': 12345, 'identity': identity, 'exited': False})
+    review_runs.save_attempt(claim)
+    signals, alive = [], {'value': True}
+
+    def identity_now(pid):
+        if reused:
+            return {**identity, 'birth': '999:1'}
+        return dict(identity) if alive['value'] else {'state': 'absent'}
+
+    def killpg(pgid, sig):
+        signals.append((pgid, sig))
+        alive['value'] = False
+
+    monkeypatch.setattr(review_runs, 'process_identity', identity_now)
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: alive['value'])
+    monkeypatch.setattr(review_runs.os, 'killpg', killpg)
+    result = review_runs.once_command(None)
+    if reused:
+        assert (result, signals, fake_paid) == (1, [], [])  # a reused PID is never signalled; dispatch waits
+    else:
+        assert signals == [(12345, signal.SIGTERM)] and result == 0 and len(fake_paid) == 1
+        old = next(item for item in attempts() if item['attempt_id'] == claim['attempt_id'])
+        assert old['status'] == 'abandoned' and old['child']['exited'] is True
+
+
+def test_auto_counts_runs_deferred_by_the_byte_cap(fake_paid, monkeypatch):
+    big = [{'step': number, 'action': '巨大' * 100, 'operation': 'CLICK'} for number in range(100)]
+    deferred = {f'20261003-100000-{number:04x}' for number in range(3)}
+    for number in range(review_runs.REVIEW_QUEUE):
+        write_run(f'20261003-100000-{number:04x}', history=big if number < 3 else [])
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_BYTES', 1500)
+    review_runs.auto_command()
+    assert len(fake_paid) == 1  # five runs wait, although only two fit the batch
+    [attempt] = attempts()
+    assert not deferred & {item['id'] for item in attempt['input_items']}
+    assert deferred <= set(review_runs.build_queue()['runs'])  # deferred runs stay queued, unacknowledged
+
+
+def test_three_failed_reviews_in_a_row_turn_automatic_reviews_off(fake_paid, monkeypatch, capsys):
+    succeeding = review_runs.launch
+
+    def no_result(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
+        fake_paid.append((text, budget))
+        process = SimpleNamespace(pid=12345)
+        before_spawn()
+        on_spawn(process)
+        on_exit(process)
+        return {}, None, 'the stream ended with no result'
+
+    monkeypatch.setattr(review_runs, 'launch', no_result)
+    for number in range(review_runs.REVIEW_QUEUE):
+        write_run(f'20261003-100000-{number:04x}')
+    for failures in range(1, review_runs.REVIEW_MAX_FAILURES + 1):
+        state = review_runs.read_state()
+        site_notes.write_review_state({**state, 'next_due': 0})  # a day later
+        assert review_runs.auto_command() == 1
+        state = review_runs.read_state()
+        assert (state['failures'], state.get('off', False)) == (failures, failures == review_runs.REVIEW_MAX_FAILURES)
+    site_notes.write_review_state({**review_runs.read_state(), 'next_due': 0})
+    assert review_runs.auto_command() == 0 and len(fake_paid) == review_runs.REVIEW_MAX_FAILURES
+    assert 'automatic reviews are off' in capsys.readouterr().out
+    assert review_runs.main(['enable']) == 0
+    state = review_runs.read_state()
+    assert (state['failures'], state['off']) == (0, False) and len(state['accounted_attempt_ids']) == 3
+    monkeypatch.setattr(review_runs, 'launch', succeeding)
+    assert review_runs.auto_command() == 0
+    assert len(fake_paid) == review_runs.REVIEW_MAX_FAILURES + 1  # automatic reviews run again after enable
+    assert review_runs.read_state()['failures'] == 0
