@@ -618,7 +618,8 @@ def test_auto_respects_lock_stamp_threshold_and_failure_limit(case, launches, mo
     before = site_notes.read_review_state()
     with open(review_runs.LOCK_PATH, "a") as lock:
         if case == "lock":
-            fcntl.flock(lock, fcntl.LOCK_EX)  # another review holds it
+            fcntl.flock(lock, fcntl.LOCK_EX)  # a manual command holds it past the short wait
+            monkeypatch.setattr(review_runs, "SHORT_LOCK_SECONDS", 0.1)
         assert review_runs.main(["auto"]) == 0
     assert launches.calls == []
     state = site_notes.read_review_state()
@@ -629,7 +630,9 @@ def test_auto_respects_lock_stamp_threshold_and_failure_limit(case, launches, mo
         assert abs(started - time.time()) < 5
         assert (state["next_due"], state["running"]) == (started + review_runs.REVIEW_EVERY_HOURS * 3600, None)
     else:
-        assert state == before  # Unknown legacy child ownership blocks dispatch without inventing a settlement.
+        # Holding the reviews' lock, which that version held for its whole review, proves the start is not alive: it
+        # counts as the third failure in a row, which turns automatic reviews off, as before versioned attempts.
+        assert (state["failures"], state["off"], state["running"]) == (3, True, None)
 
 
 def test_auto_kills_after_15_minutes(launches, monkeypatch):

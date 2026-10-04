@@ -871,13 +871,15 @@ def count_failure(state):
         state["off"] = True
 
 
-def settle(state):
-    """A start that finds running set counts that earlier start as a failure, since it never recorded its end."""
-    if state.get("running"):
-        print(f"The review started at {state['running']} never recorded its end: it counts as a failure.")
-        count_failure(state)
-        state["running"] = None
-        site_notes.write_review_state(state)
+def settle_legacy_running(state):
+    """A review from before versioned attempts recorded its start time in running and cleared it at its end, holding the
+    reviews' lock throughout. The caller holds that lock, so the review is no longer alive: like that version's own
+    next start, count it as one failure, once."""
+    print(f"The review started at {clip(state['running'], LABEL_CHARACTERS)} never recorded its end: "
+          "it counts as a failure.")
+    count_failure(state)
+    state["running"] = None
+    site_notes.write_review_state(state)
 
 
 # Delegated decision P15 (docs/failure-review-plan.md): this script writes next_due and off into state.json, and
@@ -1063,6 +1065,7 @@ def reply_of(result):
 
 DISPATCH_PATH = REVIEWS / ".dispatch.lock"
 TERMINAL_ATTEMPTS = {"succeeded", "failed", "superseded", "abandoned"}
+RESOLVE_COMMAND = "uv run python scripts/review_runs.py resolve"
 
 
 class DispatchBlocked(ValueError):
@@ -1175,27 +1178,38 @@ def settle_attempt(state, attempt):
     site_notes.write_review_state(state)
 
 
+def settle_ended(state, attempt, committed):
+    """Settle an attempt whose reviewer has ended: committed evidence makes it a success, else it was abandoned."""
+    if attempt["attempt_id"] in committed:
+        attempt.update(status="succeeded", cost=committed[attempt["attempt_id"]].get("cost"))
+    elif attempt["status"] not in TERMINAL_ATTEMPTS:
+        attempt.update(status="abandoned", error="The reviewer ended without a recorded result")
+    attempt["child"] = {**(attempt.get("child") or {}), "exited": True}
+    attempt["finished_at"] = attempt.get("finished_at") or datetime.now().isoformat()
+    save_attempt(attempt)
+    settle_attempt(state, attempt)
+
+
 def recover_attempts(state):
     """Under dispatch+review locks, settle abandoned work without redispatching it."""
     recover_pending()
     committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
     attempts = [review_records.read(path, "attempt") for path in sorted((REVIEWS / "attempts").glob("*.json"))]
-    if state.get("running") and state["running"] not in {attempt["attempt_id"] for attempt in attempts}:
-        raise DispatchBlocked("An earlier reviewer has no verifiable ownership record")
+    running = state.get("running")
+    if running and running not in {attempt["attempt_id"] for attempt in attempts}:
+        if isinstance(running, str) and not review_records.ID.fullmatch(running):
+            settle_legacy_running(state)
+        else:
+            raise DispatchBlocked("An earlier reviewer has no verifiable ownership record; "
+                                  f"inspect it, then run: {RESOLVE_COMMAND} <attempt ID>")
     for attempt in sorted(attempts, key=lambda item: item["started_at"]):
         settled = attempt["attempt_id"] in state["accounted_attempt_ids"]
         if settled and (attempt.get("child") or {}).get("exited") is True:
             continue
         if not child_exited(attempt, time.time()):
-            raise DispatchBlocked("An earlier reviewer is live or its child ownership is unknown")
-        if attempt["attempt_id"] in committed:
-            attempt.update(status="succeeded", cost=committed[attempt["attempt_id"]].get("cost"))
-        elif attempt["status"] not in TERMINAL_ATTEMPTS:
-            attempt.update(status="abandoned", error="The reviewer ended without a recorded result")
-        attempt["child"] = {**(attempt.get("child") or {}), "exited": True}
-        attempt["finished_at"] = attempt.get("finished_at") or datetime.now().isoformat()
-        save_attempt(attempt)
-        settle_attempt(state, attempt)
+            raise DispatchBlocked("An earlier reviewer is live or its child ownership is unknown; once no review "
+                                  f"runs, settle it with: {RESOLVE_COMMAND} {attempt['attempt_id']}")
+        settle_ended(state, attempt, committed)
 
 
 def claim_attempt(state, kind, batch, now):
@@ -1343,6 +1357,9 @@ def paid_command(kind, since=None):
     except ReviewBusy:
         print(BUSY)
         return 0 if kind == "auto" else 1
+    except DispatchBlocked as error:  # its message is built from this script's own records, never a reply
+        print(f"Review stopped: {error}")
+        return 0 if kind == "auto" else 1
     except (OSError, ValueError):
         print("Review stopped: storage, exclusions, or reviewer ownership require recovery; "
               "no automatic retry was made.")
@@ -1447,6 +1464,66 @@ def set_state_command(note_id, state):
     return 0
 
 
+def resolve_command(attempt_id):
+    """Settle, once, an attempt whose reviewer cannot be verified: claimed or spawning with no recorded child, or a
+    child whose identity cannot be read. The user confirms at a terminal that no review runs, as approve does. A
+    reviewer verifiably alive is never settled here: the next review stops it at its deadline."""
+    if not isinstance(attempt_id, str) or not review_records.ID.fullmatch(attempt_id):
+        print("An attempt ID has 32 hexadecimal characters; nothing resolved.")
+        return 1
+    lock = take_dispatch_lock()
+    if lock is None:
+        print(BUSY)
+        return 1
+    try:
+        with lock, review_lock():
+            state = read_state()
+            path = attempt_path(attempt_id)
+            attempt = review_records.read(path, "attempt") if path.exists() else None
+            if attempt is None and state.get("running") != attempt_id:
+                print(f"No attempt {attempt_id}; nothing resolved.")
+                return 1
+            if attempt and attempt_id in state["accounted_attempt_ids"]:
+                print(f"{attempt_id} is already settled; nothing resolved.")
+                return 0
+            committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
+            if attempt and child_exited(attempt, time.time()):
+                settle_ended(state, attempt, committed)
+                print(f"Resolved {attempt_id}: its reviewer has ended; {attempt['status']}.")
+                return 0
+            child = (attempt or {}).get("child") or {}
+            identity = child.get("identity") or {}
+            if identity.get("state") == "present" and process_identity(child["pid"]) == identity:
+                print(f"The reviewer of {attempt_id} is still running; the next review stops it at its deadline.")
+                return 1
+            print(f"No reviewer process of {attempt_id} can be verified. Settling it counts one failed review and "
+                  "never repeats it.")
+            try:
+                terminal = open_terminal()
+            except OSError as error:
+                print(f"resolve reads its confirmation from a terminal, and there is none here ({error}); "
+                      "nothing resolved.")
+                return 1
+            with terminal:
+                print("Type yes once no claude review runs: ", end="", flush=True)
+                answer = terminal.readline().strip().lower()
+            if answer != "yes":
+                print("Not resolved.")
+                return 1
+            if attempt is None:  # running names an attempt whose record never reached the disk
+                count_failure(state)
+                state.update(running=None, accounted_attempt_ids=[*state["accounted_attempt_ids"], attempt_id])
+                site_notes.write_review_state(state)
+            else:
+                attempt.update(child={"exited": True})
+                settle_ended(state, attempt, committed)
+            print(f"Resolved {attempt_id}.")
+            return 0
+    except ReviewBusy:
+        print(BUSY)
+        return 1
+
+
 def enable_command():
     """Restarts automatic reviews after REVIEW_MAX_FAILURES failures in a row."""
     lock = take_lock()  # a review that is running would overwrite the state when it ends
@@ -1478,6 +1555,8 @@ def main(argv=None):
     ):
         commands.add_parser(name, help=help_text).add_argument("note_id")
     commands.add_parser("enable", help="restart automatic reviews after failures")
+    commands.add_parser("resolve", help="settle a review attempt whose reviewer cannot be verified, confirmed at a "
+                                        "terminal").add_argument("attempt_id")
     commands.add_parser("auto", help="the automatic review the server starts: at most one a day")
     commands.add_parser("once", help="review one window now, with no threshold").add_argument(
         "--since", required=True, **since
@@ -1504,6 +1583,8 @@ def main(argv=None):
         return set_state_command(args.note_id, args.command)
     if args.command == "enable":
         return enable_command()
+    if args.command == "resolve":
+        return resolve_command(args.attempt_id)
     if args.command == "auto":
         return auto_command()
     if args.command == "once":

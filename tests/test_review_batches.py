@@ -907,3 +907,72 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
     all_output = receipt_bytes + capsys.readouterr().out + ''.join(path.read_text() for path in published)
     assert not any(canary in all_output for canary in (selected, deferred, excluded))
     assert 'the review ended with <value>: <value> <value>' in all_output
+
+
+import io  # noqa: E402
+
+LEGACY_START = '2026-09-27T09:00:00'
+
+
+def test_legacy_running_settles_once_and_only_under_the_review_lock(fake_paid, monkeypatch, capsys):
+    for number in range(review_runs.REVIEW_QUEUE):
+        write_run(f'20261003-100000-{number:04x}')
+    site_notes.write_review_state({'last_start': LEGACY_START, 'next_due': 0, 'running': LEGACY_START,
+                                   'failures': 0, 'off': False})
+    monkeypatch.setattr(review_runs, 'SHORT_LOCK_SECONDS', 0.1)
+    release, thread = hold_review_lock(10)  # that version held this lock for its whole review: maybe alive
+    assert review_runs.auto_command() == 0
+    assert review_runs.BUSY in capsys.readouterr().out and fake_paid == []
+    assert site_notes.read_review_state()['running'] == LEGACY_START
+    release.set()
+    thread.join(5)
+    assert review_runs.auto_command() == 0
+    assert capsys.readouterr().out.count('never recorded its end: it counts as a failure') == 1
+    assert len(fake_paid) == 1
+    state = review_runs.read_state()
+    assert state['running'] is None and len(state['accounted_attempt_ids']) == 1
+
+
+def unverifiable_attempt():
+    write_run()
+    claim = review_runs.claim_attempt(review_runs.read_state(), 'once', review_runs.prepare_batch(), time.time())
+    claim['status'] = 'spawning'  # spawning may have succeeded before its child was recorded
+    review_runs.save_attempt(claim)
+    return claim
+
+
+def test_resolve_settles_an_unverifiable_attempt_only_after_terminal_confirmation(fake_paid, monkeypatch, capsys):
+    claim = unverifiable_attempt()
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert f"{review_runs.RESOLVE_COMMAND} {claim['attempt_id']}" in capsys.readouterr().out
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: io.StringIO('no\n'))
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 1
+    assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: io.StringIO('yes\n'))
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 0
+    [settled] = attempts()
+    assert settled['status'] == 'abandoned' and settled['child'] == {'exited': True}
+    state = review_runs.read_state()
+    assert (state['failures'], state['running'], state['accounted_attempt_ids']) == (1, None, [claim['attempt_id']])
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 0  # already settled: counted once
+    assert review_runs.read_state()['failures'] == 1
+    assert review_runs.once_command(None) == 0 and len(fake_paid) == 1  # the next dispatch is no longer blocked
+
+
+def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch, capsys):
+    claim = unverifiable_attempt()
+    identity = review_runs.process_identity(12345)  # the fake reports this child alive with this identity
+    claim.update(status='running', child={'pid': 12345, 'identity': identity, 'exited': False})
+    review_runs.save_attempt(claim)
+    monkeypatch.setattr(review_runs, 'open_terminal', lambda: pytest.fail('a live reviewer needs no confirmation'))
+    monkeypatch.setattr(review_runs.os, 'killpg', lambda *args: pytest.fail('resolve never signals'))
+    monkeypatch.setattr(review_runs, 'group_alive', lambda pid: True)
+    assert review_runs.main(['resolve', claim['attempt_id']]) == 1
+    assert 'still running' in capsys.readouterr().out
+    assert attempts() == [claim] and review_runs.read_state()['accounted_attempt_ids'] == []
+
+
+@pytest.mark.parametrize('attempt_id', ['not-an-id', 'a' * 32])
+def test_resolve_refuses_unknown_attempts(fake_paid, attempt_id, capsys):
+    assert review_runs.main(['resolve', attempt_id]) == 1
+    assert 'nothing resolved' in capsys.readouterr().out
