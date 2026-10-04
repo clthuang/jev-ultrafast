@@ -1,5 +1,8 @@
 # Jev for Claude Code
 
+> Current implementation note (2026-10-04): use the [current contracts](robustness-efficiency/current-contracts.md) for current operational behavior and storage migration. Historical designs, examples and trial evidence below are retained; a recorded historical result does not prove this candidate.
+
+
 **Status:** implemented on 2026-09-24, and committed on 2026-09-26. The Phase 10 comparison kept the executor for all three kinds of task (`docs/performance.md`); for 10.1, the user labeled 25 runs and agreed with Claude's label on all 25. §1 describes commit `1231850`, before the change. Reviewed on 2026-09-23 against commit `1231850` and TypeSafe's documentation. It was then premortemed by three reviews (behaviour correctness, consistency with this repo, and simplicity; §3) and questioned with calvin, whose round-1 answers are folded in. The commit boundary (§4.1) was adopted on 2026-09-23.
 
 **Principle: frictionless autonomy with full observability and a feedback loop.**
@@ -250,26 +253,10 @@ Claude then: verifies → report_outcome → next instruction
 
 The server reuses the tested loop and adds only what a tool call needs:
 
-```python
-deadline, notes = time.monotonic() + 90, []
-try:
-    while agent.state["status"] not in {"done", "blocked"}:
-        if time.monotonic() > deadline:
-            raise ValueError("90 s budget reached")
-        anyio.from_thread.check_cancelled()     # also runs before each input, via agent.before_input
-        agent.command("tick")                   # tested: predict, act, re-read; stale decisions re-read
-        if new_tabs := agent.browser.close_popups():
-            raise ValueError(f"opened a new tab: {new_tabs[0]}")
-except Exception as error:                      # every stop returns as a normal result
-    notes.append(str(error))
-finally:
-    try:
-        page = agent.browser.observe(screenshot=True)   # fresh read for Claude's independent check
-    except Exception as error:                  # e.g. a dialog or a closed tab
-        page = None                             # the result falls back to the last page read, marked not fresh
-        notes.append(f"fresh read failed: {error}")
-    save_run(agent, notes, page)
-```
+The Agent owns the shared 90-second monotonic execution deadline and stops at `now >= deadline`. The MCP loop terminates on `done`, `blocked` or `stopped`, propagates cancellation checks, and records the final result. It does not start a second execution budget. Completed model usage is accounted before a late response is discarded.
+
+Final verification uses one separately bounded five-second observation attempt with settling disabled. Existing snapshot overflow/protocol-error stops do not trigger another final read. If verification fails, the cached page is explicitly diagnostic and not fresh. Post-step observation timeouts have at most two extra reads after execution is saved; input, helper calls and final verification are not retried by that path.
+
 
 - **The site boundary** lives in `Agent.command("act")`, after the decision is consumed and before any input. It checks the URL of the page the decision was made on, so no page read can bypass it. A miss sets `blocked` and raises, as the step budget already does. DONE and BLOCKED perform no input, so a run can end `done` on another site; the fresh read shows that site to Claude.
 - **Browser account:** `Browser` refuses a browser whose debugging port no process of this macOS account listens on, unless the daemon was started with `BU_CDP_URL`/`BU_CDP_WS`. Found live on 2026-09-24: with remote debugging off in the user's Chrome, browser-harness probed port 9223 and attached to a second account's debug Chrome. On refusal the daemon is stopped and no tab opens.
@@ -419,7 +406,7 @@ Each decision entry also gains the page's `omitted_actions` count.
    - Then compare the report by source hash.
 2. **Executor bugs → offline tests:** a failing run's stored page read becomes a fixture for the deterministic code, with no API calls.
 3. **Confidence stop:** add one when the report shows low-confidence steps predict failure (§10).
-4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply`, which checks them. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
+4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply --batch BATCH_ID`, which checks them. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
 5. **After editing the code,** reconnect the server with `/mcp`. It runs the code it started with, and the source hash shows which.
 
 ### 7.6 Privacy and data flows
@@ -518,7 +505,7 @@ About 270 new or changed lines were estimated; the build came to about 710 acros
 - **Confidence stop:** add when the report shows low-confidence steps predict failure. It would gate CLICK, SELECT, and TYPE_TEXT on the lower of operation and target confidence, checked in `act`.
 - **Inspector view mode:** add when run files need a visual replay. The inspector already reads this format; add loading a file and polling.
 - **Orphan-tab cleanup at startup:** add if killed servers leave tabs behind. Close targets recorded by run files whose PID is gone. One known case: a SIGTERM during a first page load that takes longer than the 5 s shutdown wait leaves that tab open (checked with a fake 7 s load).
-- **Per-request timeouts from the remaining budget:** add if slow model calls overrun the 90 seconds in practice.
+- **Per-request timeouts within the remaining budget:** implemented; positive remaining time caps HTTP phases and browser responses. In-flight calls remain cooperative, so this is not a hard total-response deadline.
 - **Label-enforcing `Stop` hook:** add when more than 20 % of runs stay unlabeled.
 - **Stale-drop reasons and WAIT loops:** add when the report shows stale decisions or budget stops whose cause the run file cannot explain. Save each dropped decision's `StalePage` text, and give a covered, covered, WAIT loop the three-stale-choices stop's code, `covered_target`. Both were found in the stall fix's review and live QA (plan decision 13); neither was seen in a real run. Since `docs/executor-improvements.md` §5, the two-WAIT stop ends that loop after two rounds, as `still_loading`, which a loading overlay over the target also gets; the screenshot tells them apart.
 - **Replay of stored decision requests:** add when prompt changes need testing without live runs.

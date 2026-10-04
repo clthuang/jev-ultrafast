@@ -1,12 +1,15 @@
 """Observed actions through Browser Harness; one CDP session, no per-step subprocess."""
 
+import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,18 +17,27 @@ from browser_harness import _ipc as ipc
 from browser_harness.admin import NAME, daemon_browser_kind, ensure_daemon, restart_daemon
 from browser_harness.helpers import cdp
 
+from jev_ultrafast.readiness import OwnedNetworkEvents, ReadinessConnectionError
+
+LOADING_QUIET_SECONDS = 0.1
+LOADING_CAP_SECONDS = 5.0
+LOADING_POLL_SECONDS = 0.02
+LOADING_TYPES = frozenset({"Document", "XHR", "Fetch", "Script"})
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
-MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+FRESH_STATE = "(request => window.__jevFast?.schema===2 ? window.__jevFast.check(request) : false)"
+MAX_SNAPSHOT_BYTES = 262144
 # One synchronous browser task owns both validation and mutation. No await, retry, or value-based fallback.
-SELECT_ACTION = """(({action,page_key,guard}) => {
+SELECT_ACTION = """(({action,snapshot_schema,observation_token}) => {
   const rejected=reason=>({status:'rejected_before_input',reason});
   const cache=window.__jevFast, option=action.option;
-  if (!cache || !option || option.document_id!==performance.timeOrigin || option.cache_epoch!==cache.epoch)
+  if (!cache || cache.schema!==2 || typeof cache.check!=='function' || !option ||
+      option.document_id!==performance.timeOrigin || option.cache_epoch!==cache.epoch)
     return rejected('Dropdown document or cache changed');
   if (!Number.isInteger(action.node) || option.select_id!==action.node || !Number.isInteger(option.option_id) ||
       !Number.isInteger(option.observed_index) || option.observed_index<0 || option.selected!==false ||
-      option.effective_disabled!==false || !Array.isArray(page_key) || !Array.isArray(guard))
+      option.effective_disabled!==false || snapshot_schema!==2 || !observation_token)
     return rejected('Dropdown descriptor is invalid');
   const select=cache.nodes.get(option.select_id), chosen=cache.nodes.get(option.option_id);
   if (!select?.isConnected || select.tagName!=='SELECT' || select.multiple || !chosen?.isConnected ||
@@ -36,8 +48,9 @@ SELECT_ACTION = """(({action,page_key,guard}) => {
       chosen.selected!==option.selected) return rejected('Dropdown option meaning or state changed');
   if (select.closest('[aria-disabled="true"],[aria-hidden="true"],[inert]') ||
       !select.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return rejected('Dropdown is unavailable');
-  if (JSON.stringify(cache.pageKey())!==JSON.stringify(page_key) ||
-      JSON.stringify(cache.guard(select))!==JSON.stringify(guard)) return rejected('Dropdown page context changed');
+  const fresh=cache.check({snapshot_schema,observation_token,action});
+  if (fresh?.status==='snapshot_too_large') return fresh;
+  if (fresh!==true) return rejected('Dropdown page context changed');
   const r=select.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
   if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight ||
       !select.contains(document.elementFromPoint(x,y))) return rejected('Dropdown is covered or outside the viewport');
@@ -76,6 +89,74 @@ class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
 
 
+class InvalidSnapshot(RuntimeError):
+    """A new browser observation does not satisfy the executable snapshot protocol."""
+
+    code = "snapshot_protocol_error"
+
+
+class SnapshotTooLarge(RuntimeError):
+    """A bounded observation failed before any input; an old page is diagnostic only."""
+
+    code = "snapshot_too_large"
+
+    def __init__(self, result):
+        self.attempted_bytes = result.get("attempted_bytes")
+        self.diagnostics = result.get("diagnostics", {})
+        super().__init__(f"snapshot_too_large: observation exceeds {MAX_SNAPSHOT_BYTES} UTF-8 bytes")
+
+
+def check_snapshot_result(result):
+    if isinstance(result, dict) and result.get("status") == "snapshot_too_large":
+        raise SnapshotTooLarge(result)
+    return result
+
+
+def validate_observation(info):
+    """Stored legacy data remains reportable; every new executable observation must be schema 2."""
+    def fail():
+        raise InvalidSnapshot("snapshot_protocol_error: incomplete or malformed schema-2 observation")
+
+    def number(value):
+        return type(value) in {int, float} and math.isfinite(value)
+
+    if not isinstance(info, dict) or type(info.get("snapshot_schema")) is not int or info["snapshot_schema"] != 2:
+        fail()
+    token = info.get("observation_token")
+    if (not isinstance(token, dict) or set(token) != {"epoch", "generation"}
+            or not isinstance(token["epoch"], str) or not token["epoch"]
+            or type(token["generation"]) is not int or token["generation"] < 1):
+        fail()
+    if any(not isinstance(info.get(key), str) for key in ("url", "title", "text")):
+        fail()
+    if any(not number(info.get(key)) or info[key] <= 0 for key in ("w", "h")):
+        fail()
+    scroll = info.get("scroll")
+    if not isinstance(scroll, dict) or any(not number(scroll.get(key)) for key in ("y", "height")):
+        fail()
+    if (not isinstance(info.get("actions"), list) or not isinstance(info.get("evidence"), list)
+            or not isinstance(info.get("diagnostics"), dict)
+            or type(info.get("omitted_actions")) is not int or info["omitted_actions"] < 0):
+        fail()
+    identifiers = set()
+    for action in info["actions"]:
+        if (not isinstance(action, dict) or not isinstance(action.get("id"), str) or not action["id"]
+                or action["id"] in identifiers or not isinstance(action.get("label"), str)
+                or not isinstance(action.get("kind"), str)
+                or action["kind"] not in {"click", "fill", "select", "scroll", "wait"}):
+            fail()
+        identifiers.add(action["id"])
+        if action["kind"] in {"click", "fill", "select"}:
+            node, reference = action.get("node"), action.get("guard_ref")
+            if (type(node) is not int or node < 1 or not isinstance(reference, dict)
+                    or type(reference.get("generation")) is not int or type(reference.get("node")) is not int
+                    or reference != {**token, "node": node}):
+                fail()
+    if any(not isinstance(item, dict) for item in info["evidence"]):
+        fail()
+    return info
+
+
 class UncertainAction(RuntimeError):
     """A dispatched mutation may have executed; preserve its attempt and never retry it."""
 
@@ -99,6 +180,7 @@ def checked_cdp(method, *, session_id, check_stop=None, remaining_budget=None, *
 
 class Browser:
     def __init__(self, url):
+        self.reset_loading()
         # Bound the wait for Chrome's "Allow remote debugging?" answer instead of hanging silently.
         ensure_daemon(wait=30)
         if port := foreign_browser_port():
@@ -179,9 +261,12 @@ class Browser:
                 pass
         for attempt in range(max_attempts):
             try:
-                return browser_operation(
+                page = browser_operation(
                     {"operation": "observe", "session": self.session, "screenshot": screenshot}, **control,
                 )
+                if getattr(self, "input_done", None) is not None:
+                    self._track()
+                return page
             except StalePage:
                 if attempt == max_attempts - 1:
                     raise
@@ -191,31 +276,164 @@ class Browser:
         raise StalePage("Page did not settle")
 
     def fresh(self, page, action=None, **control):
-        if action is not None and action["kind"] in {"click", "select"}:
-            node = action["node"]
-            if type(node) is not int:
-                return False
-            current = self.evaluate(
-                "(() => { const c=window.__jevFast; "
-                f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()", **control,
-            )
-            return current == [page["page_key"], page["guards"].get(str(node))]
-        return self.evaluate(MARKER, **control) == page["marker"]
+        if page.get("snapshot_schema") != 2 or not isinstance(page.get("observation_token"), dict):
+            return False
+        request = {"snapshot_schema": 2, "observation_token": page["observation_token"], "action": action}
+        result = self.evaluate(FRESH_STATE + "(" + json.dumps(request) + ")", **control)
+        return check_snapshot_result(result) is True
 
     def act(self, action, page, text=None, *, check_stop=None, remaining_budget=None, on_phase=None):
+        if page.get("snapshot_schema") != 2 or not isinstance(page.get("observation_token"), dict):
+            raise StalePage("Observed schema-2 page required before browser input")
         control = {"check_stop": check_stop, "remaining_budget": remaining_budget} if check_stop else {}
         if check_stop:
             check_stop()
-        if action["kind"] != "select" and not self.fresh(page, action, **control):
-            raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(min(0.1, remaining_budget()) if remaining_budget else 0.1)
+        else:
+            if not hasattr(self, "_loading_lock"):
+                self.reset_loading()
+            if self._event_source is None:
+                self._event_source = OwnedNetworkEvents(
+                    self.target, check_stop=check_stop, remaining_budget=remaining_budget,
+                )
+            self._track()
+            if check_stop:
+                check_stop()
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text,
-                                    "page_key": page.get("page_key"),
-                                    "guard": page.get("guards", {}).get(str(action.get("node")))},
+                                    "snapshot_schema": page.get("snapshot_schema"),
+                                    "observation_token": page.get("observation_token")},
                                    on_phase=on_phase, **control)
         self.after_input = action if action["kind"] != "wait" else None
+        if action["kind"] != "wait":
+            with self._loading_lock:
+                now = time.monotonic()
+                self.loading = {key: seen for key, seen in self.loading.items()
+                                if self.input_done is not None and now - seen < LOADING_CAP_SECONDS}
+                self.input_done = now
+                self.last_request = None
         return result
+
+    def reset_loading(self):
+        """A valid new goal owns a fresh subscriber and no previous goal's loading."""
+        source = getattr(self, "_event_source", None)
+        if source is not None:
+            source.close()
+        self._event_source = None
+        self._loading_lock = threading.Lock()
+        self.loading = {}
+        self.input_done = None
+        self.last_request = None
+        self.loading_lost = False
+
+    def _track(self):
+        source = getattr(self, "_event_source", None)
+        if source is None:
+            return
+        try:
+            records, lost = source.read_events()
+        except Exception:
+            with self._loading_lock:
+                self.loading_lost = True
+            raise
+        now = time.monotonic()  # Seen time, never the browser's unrelated clock.
+        with self._loading_lock:
+            self.loading_lost |= lost
+            if self.input_done is None:
+                return
+            for record in records:
+                request_id = record["requestId"]
+                if record["method"] == "Network.requestWillBeSent":
+                    kind = record.get("type")
+                    if kind not in LOADING_TYPES or (kind == "Document" and
+                                                    record.get("frameId") != source.main_frame_id):
+                        continue
+                    self.loading[request_id] = now
+                    self.last_request = now
+                elif request_id in self.loading:
+                    del self.loading[request_id]
+                    self.last_request = now
+
+    def _check_event_health(self):
+        source = getattr(self, "_event_source", None)
+        if source is not None:
+            try:
+                source.check_health()
+            except Exception:
+                with self._loading_lock:
+                    self.loading_lost = True
+                raise
+
+    @contextlib.contextmanager
+    def draining(self):
+        """Consume only this tab's queue while a decision call is in flight."""
+        source = getattr(self, "_event_source", None)
+        if source is None or self.input_done is None:
+            yield
+            return
+        self._check_event_health()
+        finished = threading.Event()
+
+        def consume():
+            while not finished.is_set():
+                try:
+                    self._track()
+                except Exception:
+                    return  # _track retains loss; terminal health is checked on exit.
+                finished.wait(LOADING_POLL_SECONDS)
+
+        consumer = threading.Thread(target=consume, name="jev-loading-consumer", daemon=True)
+        consumer.start()
+        original_error = None
+        try:
+            yield
+        except BaseException as error:
+            original_error = error
+            raise
+        finally:
+            finished.set()
+            try:
+                consumer.join()  # Never join while holding the queue or tracker lock.
+                self._check_event_health()
+            except Exception as cleanup_error:
+                if original_error is None:
+                    if isinstance(cleanup_error, ReadinessConnectionError):
+                        raise
+                    raise ReadinessConnectionError("Loading event observer cleanup failed") from None
+                original_error.add_note("Loading event observer failed during decision cleanup")
+
+    def wait_for_loading(self, *, check_stop=None, remaining_budget=None):
+        """Wait for content quiet, capped at five seconds after the original input."""
+        if check_stop:
+            check_stop()
+        source = getattr(self, "_event_source", None)
+        if source is not None:
+            self._check_event_health()
+        if getattr(self, "input_done", None) is None:
+            return None
+        started = time.monotonic()
+        deadline = self.input_done + LOADING_CAP_SECONDS
+        if started >= deadline:
+            return None
+        while True:
+            if check_stop:
+                check_stop()
+            self._track()
+            if check_stop:
+                check_stop()
+            now = time.monotonic()
+            with self._loading_lock:
+                busy = bool(self.loading) or (self.last_request is not None and
+                                             now - self.last_request < LOADING_QUIET_SECONDS)
+                capped = now >= deadline
+                if not busy or capped:
+                    result = [round((now - started) * 1000), capped and busy, self.loading_lost]
+                    self.loading_lost = False
+                    return result
+            delay = min(LOADING_POLL_SECONDS, max(0, deadline - now))
+            if remaining_budget:
+                delay = min(delay, remaining_budget())
+            time.sleep(delay)
 
     def close_popups(self):
         """Close tabs this tab opened, and return their URLs. The loop never follows a pop-up."""
@@ -233,21 +451,35 @@ class Browser:
         return True
 
     def close(self):
-        if self.target:
-            cdp("Target.closeTarget", targetId=self.target)
-            self.target = None
+        try:
+            source = getattr(self, "_event_source", None)
+            if source is not None:
+                source.close()
+                self._event_source = None
+        finally:
+            if self.target:
+                cdp("Target.closeTarget", targetId=self.target)
+                self.target = None
+
+
+PROTOCOL_FIELDS = frozenset({"snapshot_schema", "observation_token", "guard_ref", "document_id", "cache_epoch",
+                             "diagnostics"})
+
+
+def semantic_projection(value):
+    """Protocol identity is never progress, even inside an option or observation-only evidence."""
+    if isinstance(value, dict):
+        return {key: semantic_projection(item) for key, item in value.items() if key not in PROTOCOL_FIELDS}
+    if isinstance(value, list):
+        return [semantic_projection(item) for item in value]
+    return value
 
 
 def fingerprint(state):
     content = {k: state[k] for k in ("url", "text", "actions", "scroll")}
-    content["actions"] = [
-        {**action, "option": {key: value for key, value in action["option"].items()
-                              if key not in {"document_id", "cache_epoch"}}} if "option" in action else action
-        for action in state["actions"]
-    ]
     if state.get("evidence"):
         content["evidence"] = state["evidence"]
-    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(semantic_projection(content), sort_keys=True).encode()).hexdigest()
 
 
 def browser_operation(request, *, check_stop=None, remaining_budget=None, on_phase=None):
@@ -316,8 +548,17 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
     if operation == "act":
         action = request["action"]
         kind = action["kind"]
+        token = request.get("observation_token")
+        if request.get("snapshot_schema") != 2 or not isinstance(token, dict):
+            raise StalePage("Observed schema-2 page required before browser input")
+        if kind != "select":
+            fresh_request = {"snapshot_schema": 2, "observation_token": token, "action": action}
+            fresh = check_snapshot_result(evaluate(FRESH_STATE + "(" + json.dumps(fresh_request) + ")"))
+            if fresh is not True:
+                raise StalePage("Page changed since this decision. Observe again.")
         if kind == "select":
-            payload = {"action": action, "page_key": request.get("page_key"), "guard": request.get("guard")}
+            payload = {"action": action, "snapshot_schema": request.get("snapshot_schema"),
+                       "observation_token": request.get("observation_token")}
             response = mutate("Runtime.evaluate", "select",
                               expression=SELECT_ACTION + "(" + json.dumps(payload) + ")", returnByValue=True)
             try:
@@ -326,6 +567,14 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
                 raise UncertainAction(
                     "Dropdown execution reply was lost; inspect before starting another goal."
                 ) from error
+            if (isinstance(result, dict) and set(result) == {
+                    "snapshot_schema", "status", "attempted_bytes", "diagnostics"}
+                    and result["snapshot_schema"] == 2 and result["status"] == "snapshot_too_large"
+                    and type(result["attempted_bytes"]) is int and result["attempted_bytes"] > MAX_SNAPSHOT_BYTES
+                    and isinstance(result["diagnostics"], dict)):
+                input_started = False
+                phase("rejected_before_input", persist=False)
+                raise SnapshotTooLarge(result)
             if (isinstance(result, dict) and set(result) == {"status", "reason"}
                     and result["status"] == "rejected_before_input" and isinstance(result["reason"], str)):
                 input_started = False
@@ -368,9 +617,10 @@ def browser_operation(request, *, check_stop=None, remaining_budget=None, on_pha
                     mutate("Input.insertText", "text", text=request["text"])
         return {"executed": action["id"]}
 
-    info = evaluate(READ_STATE)
+    info = check_snapshot_result(evaluate(READ_STATE))
     if info is None:
         raise StalePage("Document is navigating")
+    validate_observation(info)
     info["fingerprint"] = fingerprint(info)
     if request.get("screenshot", True):
         info["screenshot"] = call("Page.captureScreenshot", format="jpeg", quality=72)["data"]

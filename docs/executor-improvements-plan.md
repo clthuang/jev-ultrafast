@@ -1,5 +1,8 @@
 # Implementation plan: page readiness (H5 and the loading wait), and the failure-review follow-ups
 
+> Current implementation note (2026-10-04): the robustness/efficiency candidate implements the policy, execution limits, versioned review storage, bounded snapshots and readiness contracts. See the [current contracts](robustness-efficiency/current-contracts.md) and its evidence/activation links. The design, planning statuses, trial counts and performance observations below are historical; they are not current release or production-activation proof.
+
+
 **Sources:**
 - **The design:** `docs/executor-improvements.md`:
   - **§2 v2** (H5): a read that times out after a step is repeated. v2 cut v1's dialog check;

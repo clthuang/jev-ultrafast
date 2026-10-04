@@ -151,10 +151,12 @@ def test_manifest_rejects_mismatched_daemon_before_browser_use(tmp_path, monkeyp
     manifest.update(processes={"chrome": record, "daemon": {**record, "pid": 3457},
                                "fixtures": {**record, "pid": 3458}, "proxy": {**record, "pid": 3459}},
                     cdp_port=9876, cdp_ws="ws://127.0.0.1:9876/devtools/browser/id", fixture_port=9877,
-                    fixture_url="http://127.0.0.1:9877", proxy_port=9878)
+                    fixture_url="http://127.0.0.1:9877", iframe_url="http://localhost:9880",
+                    iframe_port=9880, proxy_port=9878)
     (Path(manifest["profile"]) / "DevToolsActivePort").write_text("9876\n/devtools/browser/id\n")
     (Path(manifest["root"]) / "proxy-ready.json").write_text(json.dumps(
-        {"lab_id": "owned", "port": 9878, "allowed_origin": manifest["fixture_url"]}))
+        {"lab_id": "owned", "port": 9878,
+         "allowed_origins": [manifest["fixture_url"], manifest["iframe_url"]]}))
     path.write_text(json.dumps(manifest))
     monkeypatch.setattr(lab, "verify_process", lambda _record: True)
     monkeypatch.setattr(lab, "_listener_owned", lambda *_: None)
@@ -248,13 +250,14 @@ def test_cdp_cannot_override_owned_proxy():
 
 
 @pytest.mark.native
-def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest):
+@pytest.mark.parametrize("origin_key", ["fixture_url", "iframe_url"])
+def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest, origin_key):
     from jev_ultrafast.browser import Browser
 
     manifest = lab_manifest
     audit_path = Path(manifest["root"]) / "proxy-audit.jsonl"
     audit_start = len(audit_path.read_text().splitlines()) if audit_path.exists() else 0
-    browser = Browser(manifest["fixture_url"] + "/__egress__/page")
+    browser = Browser(manifest[origin_key] + "/__egress__/page")
     forbidden = f"http://127.0.0.1:{manifest['canary_port']}"
     expression = """(async forbidden => {
       const tasks=[];
@@ -298,7 +301,7 @@ def test_native_browser_egress_uses_owned_proxy_across_contexts(lab_manifest):
         # Chrome tunnels even unencrypted ws:// through CONNECT, so the proxy sees its authority, not its path.
         assert sum(item["method"] == "CONNECT" and item["target"] == f"127.0.0.1:{manifest['canary_port']}"
                    for item in denied) >= 2
-        (Path(manifest["root"]) / "network-proof.json").write_text(json.dumps(
+        (Path(manifest["root"]) / f"network-proof-{origin_key}.json").write_text(json.dumps(
             {"result": result, "proxy_requests": audit}, indent=2) + "\n")
     finally:
         browser.close_popups()
@@ -392,3 +395,82 @@ def test_production_trigger_cannot_reach_candidate_writers_or_state(tmp_path, mo
     assert production_notes.read_bytes() == before
     assert not list((production / "artifacts/reviews").glob("*.json"))
     assert not list((candidate / "artifacts/reviews").glob("*.json"))
+
+
+@pytest.mark.parametrize("origin", ["http://127.0.0.1:4568", "http://localhost:4569"])
+def test_proxy_explicitly_allows_only_two_owned_origins(origin):
+    from urllib.parse import urlparse
+
+    assert lab.proxy_target("GET", origin + "/fixture?a=1", {"Host": urlparse(origin).netloc}, 4568, 4569) == (
+        "/fixture?a=1", 0)
+    assert lab.fixture_origins(4568, 4569) == {"http://127.0.0.1:4568": 4568, "http://localhost:4569": 4569}
+
+
+@pytest.mark.parametrize("origin", [
+    "http://127.0.0.1:4569", "http://localhost:4568", "http://localhost:4570", "http://127.0.0.1:4570",
+    "http://localhost.:4569", "http://[::1]:4569", "https://localhost:4569", "http://localhost:4569@other.invalid",
+])
+def test_second_origin_does_not_allow_aliases_or_other_owned_ports(origin):
+    from urllib.parse import urlparse
+
+    with pytest.raises(lab.LabSafetyError):
+        lab.proxy_target("GET", origin + "/private", {"Host": urlparse(origin).netloc}, 4568, 4569)
+
+
+def test_proxy_streams_known_bounded_body_without_waiting_for_completion():
+    events = []
+    handler = Mock(command="GET")
+    handler.end_headers.side_effect = lambda: events.append("headers")
+    handler.wfile.write.side_effect = lambda block: events.append(block)
+    response = Mock(status=200)
+    response.getheader.return_value = "10"
+    response.getheaders.return_value = [("Content-Length", "10"), ("Content-Type", "text/html")]
+
+    def next_block(_bound):
+        assert events[0] == "headers"
+        if len(events) == 1:
+            return b"first"
+        assert events == ["headers", b"first"]  # The first bytes were forwarded before another upstream read.
+        return b"later"
+
+    response.read1.side_effect = next_block
+    lab.relay_fixture_response(handler, response, set())
+    assert events == ["headers", b"first", b"later"]
+    response.read.assert_not_called()
+    assert handler.wfile.flush.call_count == 2
+
+
+@pytest.mark.parametrize("length", ["-1", "invalid", str(lab.PROXY_LIMIT_BYTES + 1)])
+def test_proxy_refuses_unbounded_declared_stream_before_headers(length):
+    handler, response = Mock(command="GET"), Mock(status=200)
+    response.getheader.return_value = length
+    lab.relay_fixture_response(handler, response, set())
+    handler.send_error.assert_called_once()
+    handler.send_response.assert_not_called()
+    response.read1.assert_not_called()
+
+
+def test_proxy_unknown_length_still_uses_its_original_byte_bound():
+    handler, response = Mock(command="GET"), Mock(status=200)
+    response.getheader.return_value = None
+    response.read.return_value = b"x" * (lab.PROXY_LIMIT_BYTES + 1)
+    lab.relay_fixture_response(handler, response, set())
+    response.read.assert_called_once_with(lab.PROXY_LIMIT_BYTES + 1)
+    handler.send_error.assert_called_once()
+    handler.send_response.assert_not_called()
+
+
+def test_fixture_submission_counter_counts_repeats_independently_per_trial():
+    counters = lab.FixtureSubmissions()
+    assert counters.snapshot("first")["submissions"] == 0
+    assert counters.start("first", "Fetch") == 1
+    assert counters.start("first", "Fetch") == 2  # No ID-based suppression can hide duplicate browser input.
+    assert counters.start("second", "Document") == 1
+    counters.finish("first", True)
+    counters.finish("first", False)
+    first = counters.snapshot("first")
+    assert first == {"submissions": 2, "active": 0, "completed": 1, "cancelled": 1, "kinds": ["Fetch", "Fetch"]}
+    first["kinds"].clear()
+    assert counters.snapshot("first")["kinds"] == ["Fetch", "Fetch"]
+    assert counters.snapshot("second") == {"submissions": 1, "active": 1, "completed": 0,
+                                           "cancelled": 0, "kinds": ["Document"]}

@@ -94,7 +94,7 @@ function render() {
   $("screenshot").hidden = false;
   $("screenshot").src = `data:image/jpeg;base64,${page.screenshot}`;
   $("url").textContent = page.url;
-  $("page-title").textContent = page.title;
+  $("page-title").textContent = page.title + (state.page_fresh === false ? " · not fresh" : "");
   $("action-count").textContent = `${state.elements.length} elements`;
   const chosen = page.actions.find((a) => a.id === d?.choice);
   $("choice-title").textContent = d

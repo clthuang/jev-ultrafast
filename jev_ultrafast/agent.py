@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import run_store
-from .browser import Browser, StalePage, UncertainAction
+from .browser import Browser, InvalidSnapshot, SnapshotTooLarge, StalePage, UncertainAction
 from .contracts import (
     TERMINAL_STATES,
     InvalidDecision,
@@ -20,6 +20,7 @@ from .contracts import (
 )
 from .model import action_space, choose, field_context, field_text
 from .questions import COMMIT_THRESHOLD, MAX_STEPS
+from .readiness import ReadinessConnectionError
 
 # Delegated decision D16 (docs/executor-improvements.md §5): this many WAIT steps, each leaving the page unchanged, with
 # no visible progress between them, return the run to Claude, which decides what follows. Jev's WAIT is its "still
@@ -27,6 +28,7 @@ from .questions import COMMIT_THRESHOLD, MAX_STEPS
 WAITS_BEFORE_CLAUDE = 2
 EXECUTION_SECONDS = 90
 MAX_STALE_RECOVERIES = 120
+READ_TIMEOUT_REPEATS = 2
 
 
 class Agent:
@@ -62,7 +64,15 @@ class Agent:
         policy = validate_allowed_operations(allowed_operations)
         task = validate_goal(goal)
         setup_started = time.monotonic()
-        page = self.browser.observe(screenshot=self.screenshots)
+        try:
+            self.browser.reset_loading()
+            page = self.browser.observe(screenshot=self.screenshots)
+        except (SnapshotTooLarge, InvalidSnapshot) as error:
+            self.mark_snapshot_invalid(error.code)
+            raise
+        except ReadinessConnectionError:
+            self.mark_stopped("readiness_connection_error")
+            raise
         self.pending_text = None
         self.trace_path = trace_path
         self._fresh_state(task, page, allowed_sites, allow_commit, allowed_operations=list(policy))
@@ -103,6 +113,8 @@ class Agent:
             setup_ms=0,
             record=bool(self.record_dir),
             wait_streak=0,  # unchanged WAIT steps since the last visible progress; decision D16
+            repeated_reads=0,
+            loading_waits=[],
         )
 
     def snapshot(self):
@@ -130,6 +142,19 @@ class Agent:
         self.pending_text = None
         with contextlib.suppress(Exception):
             self.save()
+
+    def mark_snapshot_overflow(self):
+        self.mark_snapshot_invalid("snapshot_too_large")
+
+    def mark_snapshot_invalid(self, code):
+        self.state["page_fresh"] = False
+        if self.state["status"] == "stopped" and self.state.get("stop_code"):
+            self.state["decision"] = None
+            self.pending_text = None
+            with contextlib.suppress(Exception):
+                self.save()
+        else:
+            self.mark_stopped(code)
 
     def stop(self, code, message, *, cause=None):
         self.mark_stopped(code)
@@ -163,6 +188,22 @@ class Agent:
         result = method(*args, check_stop=self.check_stop, remaining_budget=self.remaining_budget, **kwargs)
         self.check_stop()
         return result
+
+    def post_step_observation(self):
+        """Only a saved, completed step may repeat its read; never repeat its input."""
+        for attempt in range(READ_TIMEOUT_REPEATS + 1):
+            self.check_stop()
+            if attempt:
+                self.state["repeated_reads"] += 1
+            try:
+                page = self.browser.observe(screenshot=self.screenshots, check_stop=self.check_stop,
+                                            remaining_budget=self.remaining_budget)
+            except TimeoutError:
+                if attempt == READ_TIMEOUT_REPEATS:
+                    raise
+            else:
+                self.check_stop()
+                return page
 
     def model_call(self, function, *args, field=None):
         """Account completed calls before checking a late response; pending values are installed only afterward."""
@@ -243,6 +284,11 @@ class Agent:
         steps_before = len(self.state["history"])
         try:
             result = self._command(name, body)
+        except (SnapshotTooLarge, InvalidSnapshot) as error:
+            self.mark_snapshot_invalid(error.code)
+            raise RunStopped(self.state["stop_code"], str(error)) from error
+        except ReadinessConnectionError as error:
+            self.stop("readiness_connection_error", str(error), cause=error)
         except asyncio.CancelledError:
             self.mark_stopped("cancelled")
             raise
@@ -312,9 +358,12 @@ class Agent:
                 state["status"] = "blocked"
                 raise ValueError("Reached the demo's model-call budget")
             try:
-                state["decision"] = self.model_call(
-                    choose, state["page"], state["goal"], state["history"], self.allowed_operations,
-                )
+                self.check_stop()
+                with state["browser"].draining():
+                    decision = self.model_call(
+                        choose, state["page"], state["goal"], state["history"], self.allowed_operations,
+                    )
+                state["decision"] = decision
             except InvalidDecision as error:
                 state["operation_refusal"] = error.diagnostic
                 self.stop("operation_not_allowed", str(error))
@@ -331,6 +380,12 @@ class Agent:
             if selected in {"DONE", "BLOCKED"}:
                 if decision.get("operation") != selected or decision.get("target") is not None:
                     self.refuse_operation("The terminal choice does not match its operation.", decision, selected)
+                waited = state["browser"].wait_for_loading(
+                    check_stop=self.check_stop, remaining_budget=self.remaining_budget,
+                )
+                if waited is not None:
+                    state["loading_waits"].append(waited)
+                self.check_stop()
                 if not self.browser_read(state["browser"].fresh, page):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
@@ -440,7 +495,7 @@ class Agent:
             state["stale_streak"] = 0  # a step ran
             self.save()
             self.check_stop()
-            state["page"] = self.browser_read(state["browser"].observe, screenshot=self.screenshots)
+            state["page"] = self.post_step_observation()
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],
@@ -485,5 +540,10 @@ class Agent:
     def __enter__(self):
         return self
 
-    def __exit__(self, *_args):
-        self.close()
+    def __exit__(self, _error_type, original_error, _traceback):
+        try:
+            self.close()
+        except Exception:
+            if original_error is None:
+                raise
+            original_error.add_note("Browser cleanup failed")

@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Snapshot fixture</title>
+<style>body{margin:0} #context{position:absolute;top:0;left:0;width:1000px;font-size:3px}
+button{position:fixed;width:8px;height:8px;padding:0;border:0;font-size:1px}
+#offscreen{position:absolute;left:-1000px;top:-1000px}</style>
+<form id="shared"><div id="context"></div><input id="offscreen" aria-label="Offscreen" value="old"></form>
+<script>
+const params=new URLSearchParams(location.search),count=Number(params.get('count')||250);
+context.textContent='Shared context '.repeat(500);
+window.controls=Array.from({length:count},(_,index)=>{
+  const control=document.createElement('button');control.type='button';control.id='control-'+index;
+  control.setAttribute('aria-label',params.has('oversize') ? '含義'.repeat(1200) : 'Button '+index);
+  control.style.left=(index%100)*10+'px';control.style.top=(80+Math.floor(index/100)*10)+'px';
+  shared.append(control);return control;
+});
+window.scopeReads=0;
+const nativeInnerText=Object.getOwnPropertyDescriptor(HTMLElement.prototype,'innerText').get;
+Object.defineProperty(shared,'innerText',{get(){window.scopeReads++;return nativeInnerText.call(this)}});
+window.events=[];shared.addEventListener('click',event=>events.push(event.target.id));
+</script>

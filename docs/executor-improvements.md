@@ -1,6 +1,9 @@
 # Executor improvements from the Phase 10 comparison
 
-**Status:** §5 is built; §2 and §4 are designed and planned, not built.
+> Current implementation note (2026-10-04): use the [current contracts](robustness-efficiency/current-contracts.md) for current operational behavior and storage migration. Historical designs, examples and trial evidence below are retained; a recorded historical result does not prove this candidate.
+
+
+**Status:** §2/§4 readiness and §5 WAIT handling are implemented in the current candidate; release acceptance and deployment are separate. Historical design/trial records follow.
 
 - **Round 1** (§1, §2): seven hypotheses, registered on 2026-09-24 at 12:52, before any experiment ran. All ran
   12:55–13:25 the same day.

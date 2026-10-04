@@ -235,6 +235,16 @@ def validate(record, kind):
                        or not string(item.get('id')) or item.get('reason') not in {'item_cap', 'byte_cap'}
                        for item in record['deferred'])):
             raise RecordError('Malformed deferred membership')
+        present = {key for key, relation in deps['relations'].items() if relation != {'state': 'missing'}}
+        roots = {kind: set(record[kind]) for kind in ('runs', 'notes')}
+        for item in record['deferred']:
+            if item['id'] in roots[item['kind']]:
+                raise RecordError('Duplicate deferred membership')
+            roots[item['kind']].add(item['id'])
+        if (set(deps['runs']) != present or not roots['runs'] <= present
+                or not roots['notes'] <= set(deps['notes'])
+                or any(deps['notes'].get(key) != version for key, version in record['notes'].items())):
+            raise RecordError('Incomplete batch privacy dependencies')
     elif kind == 'digest':
         ack = record.get('acknowledged')
         if (record.get('status') != 'committed' or not HASH.fullmatch(str(record.get('reply_sha256', '')))

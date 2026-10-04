@@ -1,5 +1,8 @@
 # Implementation plan: failure log, review and site notes
 
+> Current implementation note (2026-10-04): the robustness/efficiency candidate implements the policy, execution limits, versioned review storage, bounded snapshots and readiness contracts. See the [current contracts](robustness-efficiency/current-contracts.md) and its evidence/activation links. The design, planning statuses, trial counts and performance observations below are historical; they are not current release or production-activation proof.
+
+
 **Source design:** `docs/failure-review.md` v4.4, "the design" below. The user approved v4 on 2026-09-26, with the
 decisions in its §12; v4.1–v4.3 add details found while planning, and v4.4 is the user's fix after 8.2's first attempt.
 

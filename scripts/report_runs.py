@@ -140,6 +140,10 @@ def facts(run):
             "runs with omitted actions": any(d["omitted_actions"] > 0 for d in decisions),
             "site changes": len(hosts) > 1,
             "stale decisions": run["stale_decisions"],
+            "repeated reads": run.get("repeated_reads", 0),
+            "loading wait ms": sum(wait[0] for wait in run.get("loading_waits", [])),
+            "loading caps": sum(wait[1] for wait in run.get("loading_waits", [])),
+            "loading event losses": sum(wait[2] for wait in run.get("loading_waits", [])),
             **{key: values[0] for key, values in token_counts.items()},
         },
         "unknown_token_calls": {key: values[1] for key, values in token_counts.items()},
@@ -355,7 +359,7 @@ def names_excluded(text, exclude, left_out):
     return any(within(host, entry) for host in hosts for entry in exclude)
 
 
-def review_lines(reviews, kept, exclude, left_out):
+def review_lines(reviews, kept, exclude, left_out, excluded_note_ids=()):
     """The reviews' count, failures and cost, whether automatic reviews are off, and one marked block with every text
     a model wrote: waiting notes' details, each review's decisions or failure under its digest's path, and open
     proposals and label flags. A digest that cannot be read is reported, and hides no other. An item naming an
@@ -368,6 +372,29 @@ def review_lines(reviews, kept, exclude, left_out):
         unnamed = [line for line in items if not names_excluded(line, exclude, left_out)]
         hidden += len(items) - len(unnamed)
         return unnamed
+
+    def membership_lines(path, record):
+        """Keep exact sent versions distinct from the versions a committed reply acknowledged."""
+        nonlocal hidden
+        if record.get("legacy"):
+            return [f"inputs for {path}: unavailable (legacy record)",
+                    f"acknowledgments for {path}: unavailable (legacy record)"]
+        inputs = review_records.item_maps(record["input_items"])
+        acknowledgments = record.get("acknowledged", {"runs": {}, "notes": {}})
+        lines = []
+        for heading, mappings in (("inputs", inputs), ("acknowledgments", acknowledgments)):
+            items = []
+            total = sum(len(mapping) for mapping in mappings.values())
+            for kind, mapping in mappings.items():
+                for identifier, version in sorted(mapping.items()):
+                    if kind == "notes" and identifier in excluded_note_ids:
+                        hidden += 1
+                        continue
+                    items.append(f"  {kind[:-1]} {identifier} version {version}")
+            visible = shown(items)
+            lines += under_heading(f"{heading} for {path}:", visible) or [
+                f"{heading} for {path}: {'all excluded' if total else 'none'}"]
+        return lines
 
     today = date.today()
     waiting = [note for note in kept if not note["approved"] and not note["retired"] and active(note, today)]
@@ -385,6 +412,7 @@ def review_lines(reviews, kept, exclude, left_out):
         if digest["cost_key"] not in cost_keys:
             costs.append(digest["reported_cost"])
             cost_keys.add(digest["cost_key"])
+        block += membership_lines(path, digest)
         if status != "committed":
             failures += int(failed)
             items = [f"  {one_line(digest.get('failure') or digest.get('error') or '')}"]
@@ -478,11 +506,12 @@ def main(argv=None):
         print(f"No runs in {args.runs}")
     notes, error = load(artifacts / NOTES_PATH.name, create=False)  # the report never writes the notes file
     # A note excluded by its site or one of its runs never prints, as excluded runs never do.
-    kept = [note for note in notes if not note_excluded(note, exclude)]
+    kept = [note for note in notes if not note_excluded(note, exclude | left_out)]
+    excluded_note_ids = {note["id"] for note in notes} - {note["id"] for note in kept}
     lines = [*run_lines(runs, rows), *note_lines(kept, error, rows)]
     if left_out:
         lines.append(f"excluded runs left out: {len(left_out)}")
-    for line in lines + review_lines(artifacts / REVIEW_STATE.parent.name, kept, exclude, left_out):
+    for line in lines + review_lines(artifacts / REVIEW_STATE.parent.name, kept, exclude, left_out, excluded_note_ids):
         print(printable(line))
 
 

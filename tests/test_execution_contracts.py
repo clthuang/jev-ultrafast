@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import contextlib
 import json
 import subprocess
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from readiness_fakes import attach_quiet_loading_source
 
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser, demo, mcp_server, model
@@ -28,7 +30,9 @@ INVALID_POLICIES = [
 def observed_page():
     page = {
         "url": "https://example.test/", "title": "Search", "text": "Search results", "w": 1000, "h": 800,
-        "scroll": {"y": 0}, "screenshot": "",
+        "scroll": {"y": 0, "height": 800}, "screenshot": "", "snapshot_schema": 2,
+        "observation_token": {"epoch": "fixture", "generation": 1}, "evidence": [],
+        "omitted_actions": 0, "diagnostics": {},
         "actions": [
             {"id": "button", "node": 10, "kind": "click", "role": "button", "label": "Search", "value": ""},
             {"id": "field", "node": 20, "kind": "fill", "role": "textbox", "label": "Query", "value": "old",
@@ -42,6 +46,9 @@ def observed_page():
             {"id": "scroll_up", "kind": "scroll", "label": "Scroll up", "delta": -500},
         ],
     }
+    for action in page["actions"]:
+        if "node" in action:
+            action["guard_ref"] = {**page["observation_token"], "node": action["node"]}
     page["fingerprint"] = fingerprint(page)
     return page
 
@@ -61,7 +68,8 @@ def choice(action="field"):
 
 
 def make_agent(monkeypatch, policy, *, allow_commit=False, trace_path=None):
-    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True))
+    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True),
+                   draining=contextlib.nullcontext, wait_for_loading=Mock(return_value=None))
     monkeypatch.setattr(loop, "Browser", Mock(return_value=browser))
     agent = loop.Agent("https://example.test/", "Find a book", allowed_operations=policy,
                        allow_commit=allow_commit, trace_path=trace_path)
@@ -569,6 +577,7 @@ def test_first_command_starts_budget_before_external_stop_callback(monkeypatch):
 def test_final_read_cannot_resume_or_hide_stop(monkeypatch, tmp_path, failure):
     agent, clock = timed_agent(monkeypatch, trace_path=tmp_path / "run.json")
     real_browser = browser.Browser.__new__(browser.Browser)
+    attach_quiet_loading_source(real_browser)
     real_browser.session = "test"
     real_browser.after_input = {"kind": "fill", "node": 20}
     agent.browser = agent.state["browser"] = real_browser
@@ -609,8 +618,9 @@ def test_final_read_cannot_resume_or_hide_stop(monkeypatch, tmp_path, failure):
 def physical_agent(monkeypatch, *, action="button", trace_path=None):
     agent, clock = timed_agent(monkeypatch, action=action, trace_path=trace_path)
     page = agent.state["page"]
-    page.update(marker="marker", page_key=[], guards={"10": [], "20": []})
+    page.update(snapshot_schema=2, observation_token={"epoch": "fixture", "generation": 1})
     real_browser = browser.Browser.__new__(browser.Browser)
+    attach_quiet_loading_source(real_browser)
     real_browser.session = "test"
     agent.browser = agent.state["browser"] = real_browser
     calls = []
@@ -620,8 +630,8 @@ def physical_agent(monkeypatch, *, action="button", trace_path=None):
         if method != "Runtime.evaluate":
             return {}
         expression = params["expression"]
-        if expression == browser.MARKER:
-            value = "marker"
+        if expression.startswith(browser.FRESH_STATE):
+            value = True
         elif expression == browser.READ_STATE:
             value = deepcopy(page)
         elif expression.startswith(browser.SELECT_ACTION):
@@ -674,7 +684,7 @@ def test_expiry_during_browser_preflight_prevents_input(monkeypatch, tmp_path, s
     def protocol(method, **params):
         result = response(method, params)
         expression = params.get("expression", "")
-        if (stage == "freshness" and "return c ?" in expression or
+        if (stage == "freshness" and expression.startswith(browser.FRESH_STATE) or
                 stage == "hit_test" and "document.elementFromPoint" in expression):
             clock[0] = 90 if stop == "deadline" else 1
             cancelled[0] = stop == "cancellation"

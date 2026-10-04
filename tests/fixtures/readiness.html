@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>Owned readiness fixture</title>
+<button id="start" type="button" aria-label="Start once">Start once</button>
+<p id="result">Not started</p>
+<script>
+window.fixture={inputCount:0,status:'idle',startedAt:null,finishedAt:null};
+const startButton=document.getElementById('start'),resultLabel=document.getElementById('result');
+const parameters=new URLSearchParams(location.search);
+if(parameters.has('scroll'))document.body.style.height='2200px';
+startButton.addEventListener('click',()=>{
+  window.fixture.inputCount++;window.fixture.startedAt=performance.now();window.fixture.status='loading';
+  resultLabel.textContent='Loading results'; // Keep input enabled: a duplicate click must remain observable server-side.
+  const trial=encodeURIComponent(parameters.get('trial_id')||'native');
+  const delay=Number(parameters.get('delay')||1);
+  if(parameters.get('mode')==='navigation'){
+    location.href='/__readiness__/navigation?trial_id='+trial+'&seconds='+delay;return;
+  }
+  const iframeOrigin=parameters.get('iframe');
+  if(iframeOrigin){const frame=document.createElement('iframe');frame.id='child';
+    frame.src=iframeOrigin+'/__readiness__/stream-frame?stream_id='+
+      encodeURIComponent(parameters.get('stream_id')||'native');document.body.append(frame)}
+  const submit=()=>{
+    window.fixture.status='loading';
+    fetch('/__readiness__/submit?trial_id='+trial+'&seconds='+delay+
+      (parameters.has('hold')?'&hold=1':''),{method:'POST'}).then(response=>response.json()).then(()=>{
+        window.fixture.status='ready';window.fixture.finishedAt=performance.now();resultLabel.textContent='Results ready';
+      });
+  };
+  if(parameters.has('request_delay')){
+    window.fixture.status='scheduled';setTimeout(submit,Number(parameters.get('request_delay'))*1000);
+  }else submit();
+});
+</script>

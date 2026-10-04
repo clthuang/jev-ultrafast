@@ -10,6 +10,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import runpy
 import secrets
 import shutil
@@ -189,12 +190,18 @@ def _validate_endpoints(manifest, live, *, complete):
     for role, key in (("fixtures", "fixture_port"), ("proxy", "proxy_port"), ("chrome", "cdp_port")):
         if role in live and (complete or key in manifest):
             _listener_owned(manifest["processes"][role]["pid"], manifest[key])
-    if "fixtures" in live and "canary_port" in manifest:
-        _listener_owned(manifest["processes"]["fixtures"]["pid"], manifest["canary_port"])
+    if "fixtures" in live:
+        for key in ("iframe_port", "canary_port"):
+            if key in manifest:
+                _listener_owned(manifest["processes"]["fixtures"]["pid"], manifest[key])
+    if complete and ("iframe_port" not in manifest or
+                     manifest.get("iframe_url") != f"http://localhost:{manifest['iframe_port']}"):
+        raise LabSafetyError("Second owned fixture origin is missing or changed")
     if "proxy" in live and (complete or "proxy_port" in manifest):
         ready = json.loads((Path(manifest["root"]) / "proxy-ready.json").read_text())
         expected = {"lab_id": manifest["lab_id"], "port": manifest["proxy_port"],
-                    "allowed_origin": manifest["fixture_url"]}
+                    "allowed_origins": list(fixture_origins(manifest["fixture_port"],
+                                                            manifest.get("iframe_port")))}
         if ready != expected or manifest["fixture_url"] != f"http://127.0.0.1:{manifest['fixture_port']}":
             raise LabSafetyError("Proxy allowlist changed")
     if "chrome" in live:
@@ -266,8 +273,8 @@ class RuntimeGuard:
                 verify_process(manifest["processes"]["daemon"])
                 return
             if isinstance(address, tuple) and address[0] == "127.0.0.1":
-                for role, key in (("chrome", "cdp_port"), ("fixtures", "fixture_port")):
-                    if address[1] == manifest[key]:
+                for role, key in (("chrome", "cdp_port"), ("fixtures", "fixture_port"), ("fixtures", "iframe_port")):
+                    if key in manifest and address[1] == manifest[key]:
                         verify_process(manifest["processes"][role])
                         return
         raise LabSafetyError("Tests may connect only to verified native lab endpoints; provider/browser I/O denied")
@@ -427,14 +434,18 @@ def prepare(output, chrome=None, fixtures=None):
         if ready["lab_id"] != lab_id:
             raise LabSafetyError("Fixture server identity does not match")
         manifest.update(fixture_port=ready["port"], fixture_url=f"http://127.0.0.1:{ready['port']}",
+                        iframe_port=ready["iframe_port"], iframe_url=f"http://localhost:{ready['iframe_port']}",
                         canary_port=ready["canary_port"])
         _listener_owned(manifest["processes"]["fixtures"]["pid"], manifest["fixture_port"])
+        _listener_owned(manifest["processes"]["fixtures"]["pid"], manifest["iframe_port"])
         proxy_ready = root / "proxy-ready.json"
         spawn("proxy", [sys.executable, str(Path(__file__).resolve()), "serve-proxy", "--fixture-port",
-                        str(manifest["fixture_port"]), "--identity", lab_id, "--ready", str(proxy_ready),
+                        str(manifest["fixture_port"]), "--iframe-port", str(manifest["iframe_port"]),
+                        "--identity", lab_id, "--ready", str(proxy_ready),
                         "--audit", str(root / "proxy-audit.jsonl")])
         ready = _wait_for(lambda: json.loads(proxy_ready.read_text()), time.monotonic() + STARTUP_SECONDS)
-        if ready["lab_id"] != lab_id or ready["allowed_origin"] != manifest["fixture_url"]:
+        if (ready["lab_id"] != lab_id or ready["allowed_origins"] !=
+                list(fixture_origins(manifest["fixture_port"], manifest["iframe_port"]))):
             raise LabSafetyError("Proxy server identity or allowlist does not match")
         manifest["proxy_port"] = ready["port"]
         _listener_owned(manifest["processes"]["proxy"]["pid"], manifest["proxy_port"])
@@ -506,8 +517,16 @@ def close(path):
     return manifest
 
 
-def proxy_target(method, target, headers, fixture_port):
-    """Accept only an absolute HTTP URL for the exact fixture authority; never resolve other hosts."""
+def fixture_origins(fixture_port, iframe_port=None):
+    """Canonical authorities map only to fixed owned loopback listeners; no DNS or arbitrary forwarding."""
+    origins = {f"http://127.0.0.1:{fixture_port}": fixture_port}
+    if iframe_port is not None:
+        origins[f"http://localhost:{iframe_port}"] = iframe_port
+    return origins
+
+
+def proxy_target(method, target, headers, fixture_port, iframe_port=None):
+    """Accept only exact named fixture origins, including the explicitly owned cross-site iframe origin."""
     if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
         raise LabSafetyError("Proxy method denied")
     if headers.get("Upgrade") or "upgrade" in headers.get("Connection", "").lower():
@@ -515,9 +534,9 @@ def proxy_target(method, target, headers, fixture_port):
     if headers.get("Transfer-Encoding"):
         raise LabSafetyError("Ambiguous proxy request framing denied")
     parsed = urlparse(target)
-    authority = f"127.0.0.1:{fixture_port}"
-    if (parsed.scheme != "http" or parsed.netloc != authority or parsed.fragment
-            or headers.get("Host") != authority or any(character in target for character in "\r\n\x00")):
+    origins = fixture_origins(fixture_port, iframe_port)
+    if (f"{parsed.scheme}://{parsed.netloc}" not in origins or parsed.fragment
+            or headers.get("Host") != parsed.netloc or any(character in target for character in "\r\n\x00")):
         raise LabSafetyError("Proxy destination denied: fixture origin only")
     try:
         length = int(headers.get("Content-Length", "0"))
@@ -531,16 +550,59 @@ def proxy_target(method, target, headers, fixture_port):
     return path + ("?" + parsed.query if parsed.query else ""), length
 
 
-def serve_proxy(fixture_port, identity, ready, audit):
-    """Owned HTTP proxy: fixed fixture forwarder, with no CONNECT, DNS, or arbitrary sockets."""
-    authority = f"127.0.0.1:{fixture_port}"
+def relay_fixture_response(handler, response, hop_headers):
+    """Stream only a bounded declared body; unknown lengths retain the existing bounded buffer."""
+    declared = response.getheader("Content-Length")
+    payload = None
+    if declared is None:
+        payload = response.read(PROXY_LIMIT_BYTES + 1)
+        length = len(payload)
+    else:
+        try:
+            length = int(declared)
+        except ValueError:
+            handler.send_error(502, "Invalid fixture response length")
+            return
+    if not 0 <= length <= PROXY_LIMIT_BYTES:
+        handler.send_error(502, "Fixture response exceeds proxy bound")
+        return
+    handler.send_response(response.status)
+    for name, value in response.getheaders():
+        if name.lower() not in hop_headers | {"content-length"}:
+            handler.send_header(name, value)
+    handler.send_header("Content-Length", str(length))
+    handler.end_headers()
+    handler.response_started = True
+    if handler.command == "HEAD":
+        return
+    if payload is not None:
+        handler.wfile.write(payload)
+        return
+    remaining = length
+    while remaining:
+        block = response.read1(min(65536, remaining))
+        if not block:
+            raise http.client.IncompleteRead(b"", remaining)
+        if len(block) > remaining:
+            raise http.client.HTTPException("Fixture body exceeded its declared bound")
+        handler.wfile.write(block)
+        handler.wfile.flush()
+        remaining -= len(block)
+
+
+def serve_proxy(fixture_port, identity, ready, audit, iframe_port=None):
+    """Owned HTTP proxy: two exact fixture forwarders, no CONNECT, DNS, or arbitrary sockets."""
+    origins = fixture_origins(fixture_port, iframe_port)
     hop_headers = {"connection", "proxy-connection", "proxy-authorization", "keep-alive", "te", "trailer",
                    "transfer-encoding", "upgrade"}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def forward(self):
+            self.response_started = False
             try:
-                path, length = proxy_target(self.command, self.path, self.headers, fixture_port)
+                path, length = proxy_target(self.command, self.path, self.headers, fixture_port, iframe_port)
+                destination = urlparse(self.path)
+                port = origins[f"{destination.scheme}://{destination.netloc}"]
                 if len(self.headers.get_all("Host", [])) != 1 or len(self.headers.get_all("Content-Length", [])) > 1:
                     raise LabSafetyError("Duplicate proxy framing header denied")
             except (LabSafetyError, ValueError) as error:
@@ -551,27 +613,19 @@ def serve_proxy(fixture_port, identity, ready, audit):
             connection_tokens = {item.strip().lower() for item in self.headers.get("Connection", "").split(",")}
             headers = {name: value for name, value in self.headers.items()
                        if name.lower() not in hop_headers | connection_tokens}
-            headers.update(Host=authority, Connection="close")
+            headers.update(Host=destination.netloc, Connection="close")
             self.connection.settimeout(12)
             try:
                 body = self.rfile.read(length) if length else None
-                with contextlib.closing(http.client.HTTPConnection("127.0.0.1", fixture_port, timeout=12)) as upstream:
+                with contextlib.closing(http.client.HTTPConnection("127.0.0.1", port, timeout=12)) as upstream:
                     upstream.request(self.command, path, body=body, headers=headers)
                     response = upstream.getresponse()
-                    payload = response.read(PROXY_LIMIT_BYTES + 1)
-                    if len(payload) > PROXY_LIMIT_BYTES:
-                        self.send_error(502, "Fixture response exceeds proxy bound")
-                        return
-                    self.send_response(response.status)
-                    for name, value in response.getheaders():
-                        if name.lower() not in hop_headers | {"content-length"}:
-                            self.send_header(name, value)
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    if self.command != "HEAD":
-                        self.wfile.write(payload)
+                    relay_fixture_response(self, response, hop_headers)
             except (OSError, http.client.HTTPException):
-                self.send_error(502, "Owned fixture unavailable")
+                if self.response_started:
+                    self.close_connection = True  # Never write a second response into a truncated streamed body.
+                else:
+                    self.send_error(502, "Owned fixture unavailable")
 
         def record(self, outcome, reason=""):
             payload = json.dumps({"method": self.command, "target": self.path,
@@ -586,13 +640,42 @@ def serve_proxy(fixture_port, identity, ready, audit):
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     Path(ready).write_text(json.dumps({"lab_id": identity, "port": server.server_port,
-                                      "allowed_origin": "http://" + authority}))
+                                      "allowed_origins": list(origins)}))
     server.serve_forever()
 
 
+class FixtureSubmissions:
+    """Independent per-trial server counters count every submission, including accidental repeats."""
+
+    def __init__(self):
+        self.records, self.lock = {}, threading.Lock()
+
+    def snapshot(self, trial):
+        with self.lock:
+            record = self.records.get(trial, {"submissions": 0, "completed": 0, "cancelled": 0,
+                                               "active": 0, "kinds": []})
+            return {**record, "kinds": list(record["kinds"])}
+
+    def start(self, trial, kind):
+        with self.lock:
+            record = self.records.setdefault(trial, {"submissions": 0, "completed": 0, "cancelled": 0,
+                                                     "active": 0, "kinds": []})
+            record["submissions"] += 1
+            record["active"] += 1
+            record["kinds"].append(kind)
+            return record["submissions"]
+
+    def finish(self, trial, completed):
+        with self.lock:
+            self.records[trial]["active"] -= 1
+            self.records[trial]["completed" if completed else "cancelled"] += 1
+
+
 def serve_fixtures(root, identity, ready):
-    # A second, forbidden origin in the same owned process detects any proxy bypass, including raw TLS handshakes.
+    # A third, forbidden origin in the same owned process detects any proxy bypass, including raw TLS handshakes.
     canary_connections = []
+    document_streams, stream_lock = {}, threading.Lock()
+    submissions = FixtureSubmissions()
 
     class CanaryServer(http.server.ThreadingHTTPServer):
         def get_request(self):
@@ -611,8 +694,82 @@ def serve_fixtures(root, identity, ready):
     forbidden = f"http://127.0.0.1:{canary.server_port}"
 
     class Handler(http.server.SimpleHTTPRequestHandler):
+        def trial(self, request):
+            value = parse_qs(request.query).get("trial_id", ["native"])[0]
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,96}", value):
+                raise ValueError("Invalid local fixture trial ID")
+            return value
+
+        def do_POST(self):
+            request = urlparse(self.path)
+            if request.path != "/__readiness__/submit":
+                self.send_error(404)
+                return
+            self.submit(request, "Fetch")
+
+        def submit(self, request, kind):
+            trial = self.trial(request)
+            number = submissions.start(trial, kind)
+            completed = False
+            try:
+                parameters = parse_qs(request.query)
+                if parameters.get("hold") == ["1"]:
+                    self.connection.settimeout(0.2)
+                    while True:  # Deliberately no response; ownership cleanup or client disconnect ends the request.
+                        try:
+                            if not self.connection.recv(1, socket.MSG_PEEK):
+                                return
+                            time.sleep(0.2)
+                        except TimeoutError:
+                            continue
+                time.sleep(min(10, max(0, float(parameters.get("seconds", ["1"])[0]))))
+                if kind == "Document":
+                    self.respond("<!doctype html><meta charset=utf-8><title>Owned navigation result</title>"
+                                 "<p>Results ready after navigation</p><script>window.fixture=" +
+                                 json.dumps({"inputCount": number, "status": "ready"}) + ";</script>", "text/html")
+                else:
+                    self.respond(json.dumps({"ready": True, "submission": number}), "application/json")
+                completed = True
+            finally:
+                submissions.finish(trial, completed)
+
         def do_GET(self):
             request = urlparse(self.path)
+            if request.path == "/__readiness__/submissions":
+                self.respond(json.dumps(submissions.snapshot(self.trial(request))), "application/json")
+                return
+            if request.path == "/__readiness__/navigation":
+                self.submit(request, "Document")
+                return
+            if request.path == "/__readiness__/stream-status":
+                stream_id = parse_qs(request.query).get("stream_id", ["native"])[0]
+                with stream_lock:
+                    status = dict(document_streams.get(stream_id, {}))
+                self.respond(json.dumps(status), "application/json")
+                return
+            if request.path == "/__readiness__/stream-frame":
+                stream_id = parse_qs(request.query).get("stream_id", ["native"])[0]
+                first = ("<!doctype html><meta charset=utf-8><title>Owned streaming child Document</title><body>"
+                         "<script>window.childState={started:true,finished:false};</script>"
+                         "<p>Initial document bytes received</p>" + " " * 4096).encode()
+                last = b"<script>window.childState.finished=true;</script></body>"
+                with stream_lock:
+                    document_streams[stream_id] = {"started": True, "finished": False,
+                                                   "initial_bytes": len(first), "remaining_bytes": len(last)}
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(first) + len(last)))
+                self.end_headers()
+                try:
+                    self.wfile.write(first)
+                    self.wfile.flush()
+                    time.sleep(8)
+                    self.wfile.write(last)
+                    self.wfile.flush()
+                finally:
+                    with stream_lock:
+                        document_streams[stream_id]["finished"] = True
+                return
             if request.path == "/__egress__/status":
                 self.respond(json.dumps({"connections": len(canary_connections), "canary_port": canary.server_port}),
                              "application/json")
@@ -655,8 +812,10 @@ def serve_fixtures(root, identity, ready):
             self.wfile.write(payload)
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=root))
+    iframe = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=root))
+    threading.Thread(target=iframe.serve_forever, daemon=True).start()
     Path(ready).write_text(json.dumps({"lab_id": identity, "port": server.server_port,
-                                      "canary_port": canary.server_port}))
+                                      "iframe_port": iframe.server_port, "canary_port": canary.server_port}))
     server.serve_forever()
 
 
@@ -691,6 +850,7 @@ def main():
     fixture.add_argument("--ready", required=True)
     proxy = commands.add_parser("serve-proxy")
     proxy.add_argument("--fixture-port", required=True, type=int)
+    proxy.add_argument("--iframe-port", required=True, type=int)
     proxy.add_argument("--identity", required=True)
     proxy.add_argument("--ready", required=True)
     proxy.add_argument("--audit", required=True)
@@ -707,7 +867,7 @@ def main():
     elif args.command == "serve-fixtures":
         serve_fixtures(args.root, args.identity, args.ready)
     elif args.command == "serve-proxy":
-        serve_proxy(args.fixture_port, args.identity, args.ready, args.audit)
+        serve_proxy(args.fixture_port, args.identity, args.ready, args.audit, args.iframe_port)
     else:
         RuntimeGuard().install()
         runpy.run_module("jev_ultrafast.mcp_server", run_name="__main__")

@@ -1,39 +1,61 @@
-# Candidate activation and compatible rollback
+# Activation and compatible rollback
 
-Status: draft operational procedure. No activation, live migration, or production restart has been performed. This document will be reconciled with the final tested CLI and the disposable rehearsal before RELEASE-3 can pass.
+This runbook is for a separately authorized deployment. Implementing and validating the candidate does not migrate production storage, restart services or authorize paid reviews.
 
-## Release prerequisites
+Candidate and evidence: `artifacts/robustness-efficiency-completion/20261004/`. Use the final immutable source manifest, completed release checks, independent review, premortem, storage rehearsal and reconstructed patch from that directory. Earlier dated candidate directories are historical.
 
-Use the reviewed candidate under `artifacts/robustness-efficiency-implementation/20261003T100051Z/candidate`. Every gate through GATE-RELEASE must have raw validation output, an immutable source hash manifest, and zero unresolved review blockers. Native fixtures prove only their observed correctness and transfer measurements; no paid or public-site benchmark has been run.
+## Before activating
 
-`export_candidate.py` builds a binary-capable patch from the captured baseline and candidate, checks that production source and the captured baseline still match, dry-runs and applies the patch in a disposable copy, and verifies that every reconstructed source file has the final candidate hash. It does not apply the patch to the running checkout. Production drift or an already-existing export directory causes refusal. Do not bypass a drift refusal: review and reconcile concurrent user changes, then recapture/revalidate the affected candidate.
+1. Confirm the exact checkout, its current revision and its local changes. Validate the exported patch against the recorded merged baseline. Preserve unrelated work.
+2. Inventory every MCP server, review child and other process that can write the chosen artifact tree. Identify each by executable, full arguments, cwd and birth identity. Historical PIDs are not shutdown instructions. Disable new dispatch and stop the identified writers through their owning service/session; verify they have exited. An unknown owner blocks activation.
+3. With writers stopped, create a new backup outside the active artifact tree and record its exact file inventory and checksums. Include runs, reviews, notes, exclusions and scheduling/attempt state. Read the backup back and verify it.
+4. Review the installed wheel/import check and native local-fixture evidence for the exact candidate. Keep credentials server-side and `.env` out of the candidate and exported patch. Choose the activation checkout and service configuration explicitly.
 
-## Writer inventory and quiescence
+The migration CLI does not stop legacy writers for you. Short storage locks cannot make an old list-only writer safe after envelope activation.
 
-The production checkout is `/Users/terry/projects/jev-ultrafast`. Its cwd-relative state includes `artifacts/runs/`, `artifacts/site-notes.json`, `artifacts/review-exclude.txt`, and `artifacts/reviews/`. Include the entire review directory so batches, attempts, committed digests, state, and any pending receipt remain available for recovery. Do not copy `.env` into the candidate or release evidence.
+## Migration and restart
 
-Observed live source users at resumption were MCP processes 75343, 98672, 15994, and 35399, and browser-harness daemon 386. These IDs are an inventory observation, not a future permission to signal them. Before activation, resolve current command, executable, cwd, parent, and process start identity again. Identify any new MCP, demo, manual review, automatic review, recording/example runner, and owned review child. A running root MCP can spawn `scripts/review_runs.py` afresh, so replacing source while leaving it running would mix generations.
+Run these commands from the selected source checkout with its installed environment. The storage tools live in `scripts/`; a wheel-only installation does not provide this operational interface. Replace the paths with the explicitly chosen artifact tree and a new external export directory; these are operational examples, not commands already run on production.
 
-For the actual activation window, stop old writers through their owning application/session, disable new launches temporarily, and verify exit and identity. Do not kill a process merely because its PID matches this document. Review launch ownership that cannot be established blocks activation. Browser processes may serve unrelated work; do not close them globally. Quiesce each source/storage writer before publishing a notes envelope. Keep the dispatch → review → metadata → notes lock order when acquiring implementation locks; no short metadata/notes lock may be held during a model wait.
+```sh
+uv run python -m scripts.migrate_review_storage --artifacts /absolute/active/artifacts --migrate
+uv run python -m scripts.migrate_review_storage --artifacts /absolute/active/artifacts --export /absolute/new-export
+```
 
-## Backup and source switch
+Migration retains legacy note fields and creates the schema-2 envelope. Unknown versions or malformed storage must be investigated rather than overwritten. Export copies `runs/*.json`, `reviews/**/*.json`, `site-notes.json` and `review-exclude.txt` with a checksum manifest. It does not copy screenshots, process logs or arbitrary artifact files; keep the full backup separately. Verify this complete expected export file set and every checksum against the active source; checking only whatever happened to be copied is insufficient.
 
-After quiescence, capture a complete backup of current state and source patch with SHA-256 manifest in an access-controlled location. Validate the backup by reading it back and comparing hashes. Record the current source hash manifest, schema versions, process inventory, and whether a receipt is pending. Do not treat an earlier implementation baseline as a backup of current user state.
+Review storage paths are cwd-relative. Before starting new writers or enabling automatic/paid dispatch, recover any `pending_review` receipt using the new implementation and confirm that its immutable digest is durable. The following snippet checks that its cwd targets the SAME artifact tree used for migration/export and holds the required review lock. Run it from the operational source checkout. The absolute path is an example to replace deliberately:
 
-Apply only the reconstructed, reviewed patch after its current-baseline check passes. Install the compatible tested runtime and dependencies, then verify imports and shipped snapshot/static assets. An old executable entrypoint that imports changed files from an unexpected path is a failed activation check.
+```sh
+JEV_ACTIVE_ARTIFACTS=/absolute/active/artifacts uv run python - <<'PY'
+import os
+from pathlib import Path
 
-Migrate only with the final release's tested migration/recovery API. Legacy list notes become schema 2 without dropping approvals, retirement, counters, or pending receipt data. Run outcome corrections remain in order. Resolve pending receipts into the exact immutable digest before permitting another apply or paid dispatch. Unknown schemas, corrupt files, dependency conflict, or publication uncertainty stop the operation; preserve evidence and do not overwrite it with an empty store.
+expected = Path(os.environ['JEV_ACTIVE_ARTIFACTS']).resolve()
+if expected != Path('artifacts').resolve():
+    raise SystemExit('Wrong operational cwd: artifacts path does not match migration/export')
+from scripts.review_runs import recover_pending, review_lock
 
-## Restart verification
+with review_lock():
+    recovered_digest = recover_pending()
+print('Receipt recovery completed:', recovered_digest)
+PY
+```
 
-Start new readers/writers with automatic paid review disabled for the initial check. Verify the runtime source path and schema support, read notes and mixed legacy/current review records, and inspect a disposable run through the public API. Confirm explicit `allowed_operations`, stopped-state behavior, no duplicate input, and receipt/acknowledgment reporting. No live goal or paid review is needed to validate the source switch. Restore the previously intended review setting only after the activation checks pass and record that action separately.
+Recovery must not be replaced with a paid `once` or `preflight` command. After verification, start only the new envelope-aware readers/writers with this same checked cwd.
 
-## Compatible rollback
+Verify note readability, complete outcome histories, pending receipt state, exact acknowledgment versions, exclusion/cutoff configuration and the previous attempt/scheduling state. Enable dispatch only after these checks. Keep the original backup as audit evidence.
 
-A code rollback after schema migration must use a tested schema-2-compatible reader/writer or the tested export route. Do not restart old list-only note writers against an envelope; do not restore stale notes/runs/review backups over newer labels, notes, receipts, or acknowledgment history. First quiesce current writers, recover pending receipts if supported, and export all current state with a checksum manifest. A compatibility export must retain both the legacy-facing data and the authoritative current metadata needed to avoid duplicate notes or reviews. If this cannot be proved, leave writers stopped and keep the current data intact.
+Manual review uses a frozen batch. `uv run python -m scripts.review_runs queue > /absolute/review-input.txt` prints its batch identity; apply a reply to that exact identity using `uv run python -m scripts.review_runs apply --batch BATCH_ID < reply.json`. Queue membership is not acknowledgment. Never substitute a current queue for the saved batch.
 
-Rollback rehearsal must demonstrate that notes and outcomes added after migration survive, that already committed decisions are not repeated, and that pending receipt and exact-version acknowledgment history remain recoverable. No fixture or backup is promoted into production by the rehearsal.
+## Failure or rollback
 
-## Required disposable rehearsal evidence
+Stop new dispatch and quiesce the exact current writers again. Export the current run/review JSON state, notes and exclusions to a new external directory with the command above. Preserve all new notes, labels, attempts, exclusions and receipts, including work written after the original backup. Retain both the active and exported trees while investigating.
 
-The rehearsal will use separate fixture storage and fake launchers. It must cover legacy approved/retired notes, corrected labels, legacy digests, a versioned batch and attempt, pending receipt recovery, a post-migration note/outcome write, compatible export/reload, and zero paid launches. Capture process detection/quiescence against owned dummy writers, backup readback checksums, all commands and results, before/after state assertions, and cleanup proof. This draft is not evidence that the rehearsal has passed.
+If note replacement committed but digest publication failed, the pending receipt is the recovery authority. Start a fresh process using the new code against the exported state, recover the receipt, and replay the same reply only against its original batch. Verify no duplicate notes and exact acknowledgment versions. A conflicting digest or reply needs investigation; do not clear the receipt manually.
+
+A rollback can use only a reader/writer version compatible with the schema-2 envelope and receipts, or an explicitly reviewed compatibility conversion that preserves current state. Restoring a pre-migration list or stale backup over the current tree loses committed work and is not a supported rollback.
+
+## Rehearsal scope
+
+The disposable release rehearsal seeds legacy data, refuses migration while its verified dummy writer is alive, confirms writer exit, verifies backup completeness, migrates, writes a new note and outcome correction, injects post-commit digest failure, exports pending state, recovers in a fresh process and verifies identical replay plus complete current export. Its synthetic attempt fixture makes no paid model call. Read the recorded assertions and checksums before treating the rehearsal as passed. It does not establish real-service startup or live-site performance.

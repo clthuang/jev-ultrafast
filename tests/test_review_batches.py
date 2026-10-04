@@ -341,7 +341,7 @@ def test_storage_failure_acknowledges_nothing(monkeypatch):
     assert RUN_B in review_runs.build_queue()['runs']
 
 
-@pytest.mark.parametrize('boundary', ['before_notes', 'after_notes', 'notes_fsync', 'before_digest',
+@pytest.mark.parametrize('boundary', ['before_notes', 'after_notes', 'notes_fsync', 'digest_fsync', 'before_digest',
                                       'after_digest', 'before_cleanup', 'after_cleanup'])
 def test_crash_at_each_publication_boundary(monkeypatch, boundary):
     recovery()
@@ -364,7 +364,8 @@ def test_crash_at_each_publication_boundary(monkeypatch, boundary):
         return result
 
     def sync(directory):
-        if not fired and boundary == 'notes_fsync' and directory.name == 'artifacts':
+        expected_directory = {'notes_fsync': 'artifacts', 'digest_fsync': 'reviews'}.get(boundary)
+        if not fired and directory.name == expected_directory:
             fired.append(boundary)
             raise OSError('injected directory fsync')
         return fsync(directory)
@@ -389,8 +390,32 @@ def test_crash_at_each_publication_boundary(monkeypatch, boundary):
     assert site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review'] is None
 
 
-def test_directory_fsync_failure_after_replace_never_replays(monkeypatch):
-    test_crash_at_each_publication_boundary(monkeypatch, 'notes_fsync')
+@pytest.mark.parametrize('boundary', ['notes_fsync', 'digest_fsync'])
+def test_directory_fsync_failure_after_replace_never_replays(monkeypatch, boundary):
+    test_crash_at_each_publication_boundary(monkeypatch, boundary)
+
+
+@pytest.mark.parametrize('corruption', ['conflicting', 'malformed'])
+def test_existing_digest_corruption_retains_receipt_without_replaying(monkeypatch, corruption):
+    recovery()
+    batch, reply = review_runs.prepare_batch(), {**EMPTY_REPLY, 'decisions': [add_decision()]}
+    original = review_runs.ensure_digest
+    monkeypatch.setattr(review_runs, 'ensure_digest', lambda receipt: (_ for _ in ()).throw(OSError('disk full')))
+    with pytest.raises(OSError):
+        apply_batch(batch, reply)
+    envelope = site_notes.NOTES_PATH.read_bytes()
+    receipt = site_notes.read_envelope(site_notes.NOTES_PATH)['pending_review']
+    path = review_runs.committed_path(batch['batch_id'])
+    broken = {**receipt['digest'], 'summary': 'conflicting'} if corruption == 'conflicting' else {'schema_version': 99}
+    path.write_text(json.dumps(broken))
+    before = path.read_bytes()
+    monkeypatch.setattr(review_runs, 'ensure_digest', original)
+    for _ in range(2):
+        with pytest.raises(review_records.RecordError):
+            apply_batch(batch, reply)
+        assert site_notes.NOTES_PATH.read_bytes() == envelope
+        assert path.read_bytes() == before
+        assert sum(note['runs'].get('recovered') == RUN_B for note in site_notes.load()[0]) == 1
 
 
 def test_all_note_writers_preserve_pending_receipt(monkeypatch):
@@ -709,6 +734,34 @@ def test_batch_corruption_is_rejected_before_application(mutation):
         review_records.validate(broken, 'batch')
 
 
+@pytest.mark.parametrize('contributor', ['selected', 'deferred', 'excluded_predecessor'])
+@pytest.mark.parametrize('remove_relation', [False, True])
+def test_incomplete_privacy_dependencies_refuse_publication(monkeypatch, contributor, remove_relation):
+    canary = 'PrivateDependencyCanary'
+    write_run(RUN_A, previous_run=RUN_C)
+    write_run(RUN_B)
+    write_run(RUN_C)
+    site_notes.EXCLUDE_PATH.write_text(RUN_C)
+    target = {'selected': RUN_A, 'deferred': RUN_B, 'excluded_predecessor': RUN_C}[contributor]
+    path = review_runs.RUNS / f'{target}.json'
+    run = json.loads(path.read_text())
+    run['history'] = [{'text': canary}]
+    path.write_text(json.dumps(run))
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 1)
+    batch = review_runs.prepare_batch()
+    assert target in batch['dependencies']['runs']
+    assert canary not in batch['sent_text']
+    batch['dependencies']['runs'].pop(target)
+    if remove_relation:
+        batch['dependencies']['relations'].pop(target)
+    (review_runs.REVIEWS / 'batches' / f'{batch["batch_id"]}.json').write_text(json.dumps(batch))
+    with pytest.raises((review_records.RecordError, review_runs.Superseded)):
+        apply_batch(batch, {**EMPTY_REPLY, 'summary': canary})
+    assert not review_records.committed(review_runs.REVIEWS)
+    assert review_records.acknowledged(review_runs.REVIEWS) == {'runs': {}, 'notes': {}}
+    assert not site_notes.NOTES_PATH.exists()
+
+
 @pytest.mark.parametrize('mutation', ['missing_items', 'missing_finished', 'bad_ack', 'extra_ack', 'wrong_filename'])
 def test_digest_corruption_never_acknowledges_or_replays(mutation):
     write_run()
@@ -820,8 +873,9 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
         return init, result, None
     monkeypatch.setattr(review_runs, 'launch', provider_error)
     assert review_runs.once_command(None) == 1
-    report_runs.review_lines(review_runs.REVIEWS, site_notes.load()[0], {RUN_C}, {RUN_C})
+    report_output = '\n'.join(report_runs.review_lines(review_runs.REVIEWS, site_notes.load()[0], {RUN_C}, {RUN_C}))
     published = [site_notes.NOTES_PATH, *review_runs.REVIEWS.rglob('*.json')]
-    all_output = receipt_bytes + capsys.readouterr().out + ''.join(path.read_text() for path in published)
+    all_output = (receipt_bytes + report_output + capsys.readouterr().out
+                  + ''.join(path.read_text() for path in published))
     assert not any(canary in all_output for canary in (selected, deferred, excluded))
     assert 'the review ended with <value>: <value> <value>' in all_output

@@ -596,10 +596,19 @@ def load_batch(batch_id):
 def verify_batch(batch, runs, notes, exclude):
     """Verify recorded contributors and relation queries without adding unrelated arrivals."""
     deps = batch["dependencies"]
+    roots = set(batch["runs"])
+    note_ids = set(batch["notes"])
+    for item in batch["deferred"]:
+        (roots if item["kind"] == "runs" else note_ids).add(item["id"])
+    for note in notes:
+        if note["id"] in note_ids:
+            roots.update(key for key in [*note["runs"]["failed"], note["runs"].get("recovered")]
+                         if isinstance(key, str) and RUN_ID.fullmatch(key))
+    privacy_ids = review_records.closure(runs, roots)
     if (review_records.digest(sorted(exclude)) != batch["exclusions_version"]
             or any(key not in runs or review_records.base_version(runs[key]) != version
                    for key, version in deps["runs"].items())
-            or review_records.relations(runs, deps["relations"]) != deps["relations"]
+            or review_records.relations(runs, privacy_ids) != deps["relations"]
             or {note["id"]: note_hash(note) for note in notes
                 if review_records.digest(note["site"]) in deps["note_site_hashes"]} != deps["notes"]):
         raise Superseded("Batch dependencies changed; prepare a new batch")

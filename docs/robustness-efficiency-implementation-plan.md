@@ -1,6 +1,6 @@
 # Implementation plan: robustness and efficiency
 
-Status: ready for implementation. Plan revision 2, 2026-10-03; all implementation tasks and gates are not started.
+Status: implementation candidate prepared against merged baseline `a94014bff419b939dd0f388e80c7a75d07eb41f9`. Current acceptance is recorded in `artifacts/robustness-efficiency-completion/20261004/progress.json`; the original planning decisions remain below.
 
 Source: [reviewed design, revision 3](robustness-efficiency-proposal.md) and its
 [review/validation/premortem](robustness-efficiency-review.md).
@@ -22,7 +22,7 @@ decision, observed targets only, no mutation retries, and independent outcome ve
 | Reduce snapshot transfer | At most 250 target guards; transport at most 262,144 UTF-8 bytes excluding screenshots or explicit terminal overflow; freshness/progress semantics preserved |
 | Integrate page readiness | Post-step timeout rereads, the network loading gate and two-WAIT handoff compose without repeating input or restarting loading allowances |
 
-All implementation tasks and gates below start **Not started**. A task becomes Done only after its stated assertions
+The original planning checkpoint started every task and gate **Not started**. Use the dated execution ledger for current acceptance. A task becomes Done only after its stated assertions
 pass and evidence is saved. Gate completion is separate from task completion. Missing fixtures, skipped required
 cases, an absent proposed test, or zero tests collected never count as a pass.
 
@@ -110,6 +110,8 @@ Use a structured execution stop (`RunStopped`, compatible with existing ValueErr
 | `execution_deadline` | `stopped` | No new work/gesture; only the paired release above may finish; late DONE cannot override it |
 | `stale_recovery_limit` | `stopped` | Preserve stale reason/count; no next recovery read |
 | `snapshot_too_large` | `stopped` | No stale fallback; old page diagnostic only, marked not fresh |
+| `snapshot_protocol_error` | `stopped` | Malformed newly returned observations fail before model/input; old page is diagnostic and no final-read fallback runs |
+| `readiness_connection_error` | `stopped` | During commands or valid continuation, observer failure clears pending decisions; preserve the original error |
 
 Keep cancellation/shutdown and uncertain-input paths distinguishable; preserve original exceptions where the MCP
 transport requires propagation. Terminal states are `done`, `blocked`, `stopped`; direct commands cannot resume any
@@ -118,6 +120,8 @@ the original error. These new stop codes are execution diagnostics, not automati
 existing `failure_code(status, notes, history)` behavior and old files remain compatible.
 
 ### Browser → Agent: snapshot schema 2
+
+Implementation hardening: malformed or unsupported newly returned observations raise `InvalidSnapshot` and stop with `snapshot_protocol_error` before model/input. Stored legacy snapshots remain reportable, never executable.
 
 `observe()` returns a complete schema-2 observation or raises `SnapshotTooLarge`. `fresh()` compares against the
 specified stored baseline and returns a boolean; it never installs a baseline. Overflow propagates distinctly
@@ -587,13 +591,12 @@ qualified native composition node in READINESS-3 and every mapped inherited acce
 
 ## 7. Commands and final delivery tasks
 
-The native harness tasks must implement this interface; commands are future acceptance commands, not currently
-available tools or already-passing checks:
+The native harness implements this interface. Each new run needs its own verified local lab; past checks are not a substitute for the final fixed-source evidence:
 
 ```sh
-uv run python scripts/validation_lab.py prepare --output artifacts/robustness-efficiency-implementation/<run_id>/lab.json
-uv run pytest -q -o addopts='' -m native tests/test_browser_native.py --lab-manifest artifacts/robustness-efficiency-implementation/<run_id>/lab.json
-uv run python scripts/validation_lab.py close --manifest artifacts/robustness-efficiency-implementation/<run_id>/lab.json
+uv run python scripts/validation_lab.py prepare --fixtures tests/fixtures --output artifacts/robustness-efficiency-completion/<run_id>/lab.json
+uv run pytest -q -o addopts='' -m native tests --lab-manifest artifacts/robustness-efficiency-completion/<run_id>/lab.json
+uv run python scripts/validation_lab.py close --manifest artifacts/robustness-efficiency-completion/<run_id>/lab.json
 ```
 
 Replace `<run_id>` with the recorded concrete evidence directory before execution. Prepare must use a fresh owned
@@ -665,6 +668,4 @@ recovery, browser preflight deadline checks, paid-call denial in native tests, a
 The final pass verified unique task IDs, dependency closure, local links, Markdown fences, whitespace and preservation
 of the source design/review/user-edited documents. The plan contains **27 implementation subtasks and 8 gates**.
 
-All tasks and gates remain **Not started**. No runtime code was changed, no storage migrated, and no proposed
-implementation tests were run during planning. The named tests and native harness are future deliverables; existing
-validation in the source design remains historical evidence. Begin with SETUP-1 and do not skip incomplete gates.
+Historical planning checkpoint (2026-10-03): all tasks and gates were **Not started**. No runtime code was changed, no storage migrated, and no proposed implementation tests were run during planning. Current implementation and gate acceptance are recorded in the dated execution ledger; validation in the source design remains historical evidence.
