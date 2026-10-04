@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import time
 from urllib.parse import quote
 
 from validation_lab import RuntimeGuard, configure_native
@@ -26,7 +27,7 @@ def main():
     manifest = configure_native(parser.parse_args().lab_manifest)
     RuntimeGuard(manifest).install()
     os.chdir(manifest["state"])
-    from jev_ultrafast.browser import Browser, StalePage
+    from jev_ultrafast.browser import Browser, StalePage, UncertainAction
 
     browser = Browser("data:text/html," + quote(HTML))
     passed = []
@@ -147,8 +148,8 @@ def main():
         confirm = next(a for a in page["actions"] if a["label"] == "Confirm")
         try:
             browser.act(confirm, page)
-        except TimeoutError:
-            pass
+        except UncertainAction as error:  # the dialog holds the click's release: its reply is lost, never retried
+            assert isinstance(error.__cause__, TimeoutError), repr(error.__cause__)
         else:
             raise AssertionError("An open dialog should block the click")
         assert browser.dismiss_dialog()
@@ -159,7 +160,10 @@ def main():
         link = next(a for a in page["actions"] if a["label"] == "Open")
         browser.act(link, page)
         assert browser.close_popups() == ["about:blank"]
-        assert browser.close_popups() == []
+        deadline = time.monotonic() + 2
+        while browser.close_popups():  # Chrome lists a closing tab for a moment after closeTarget returns
+            assert time.monotonic() < deadline, "a closed pop-up stayed open"
+            time.sleep(0.05)
         passed.append("pop-up tab closed and reported")
     finally:
         browser.close()

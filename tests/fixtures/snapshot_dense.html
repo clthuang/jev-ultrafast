@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dense snapshot fixture</title>
+<style>
+body{margin:0}
+#context{position:absolute;left:0;top:0;width:1120px;height:18px;margin:0;overflow:hidden;font-size:2px;line-height:2px}
+button{position:absolute;padding:0;border:0;margin:0;font-size:1px;overflow:hidden}
+ul{margin:0;padding:0;list-style:none}
+</style>
+<form id="form" onsubmit="return false"><p id="context"></p></form>
+<div id="spacer"></div>
+<script>
+// ?n= controls on a fixed grid inside the 1120x780 view; ?scope=row puts ten in each <li>; ?pad= adds that many
+// euro signs to each label. The shared 6,000-character context comes first, so it fills a read's visible text.
+(() => {
+const params=new URLSearchParams(location.search);
+const n=Number(params.get('n'))||250, pad=Number(params.get('pad'))||0, rows=params.get('scope')==='row';
+const base='Shared context: prices, dates and conditions for every control on this page. ';
+document.querySelector('#context').textContent=base.repeat(Math.ceil(6000/base.length)).slice(0,6000);
+const form=document.querySelector('#form'), list=document.createElement('ul'), offset=20;
+form.append(list);
+const cols=Math.ceil(Math.sqrt(n*1120/(780-offset))), lines=Math.ceil(n/cols);
+const width=Math.floor(1120/cols), height=Math.floor((780-offset)/lines);
+let row=form;
+window.clicks=0;
+for (let i=0;i<n;i++) {
+  if (rows && i%10===0) {
+    row=document.createElement('li');
+    row.dataset.row=String(i/10+1);
+    list.append(row);
+  }
+  const control=document.createElement('button');
+  control.type='button';
+  control.textContent='Control '+(i+1)+(pad ? ' '+'€'.repeat(pad) : '');
+  control.style.cssText=`left:${(i%cols)*width}px;top:${offset+Math.floor(i/cols)*height}px;`+
+    `width:${width-1}px;height:${height-1}px`;
+  control.addEventListener('click',()=>window.clicks++);
+  row.append(control);
+}
+})();
+</script>

@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Snapshot parity fixture</title>
+<style>
+body{margin:0;font:14px sans-serif}
+#booking{position:absolute;left:20px;top:10px;width:420px;margin:0}
+#rows{position:absolute;left:480px;top:10px;width:300px;margin:0;padding:0;list-style:none}
+#unrelated{position:absolute;left:820px;top:10px;margin:0}
+#grid{position:absolute;left:0;top:420px;width:1120px;height:300px}
+#grid button{position:absolute;width:12px;height:12px;padding:0;border:0;margin:0}
+#offscreen{position:absolute;top:3000px}
+select,input,button{display:block;margin:6px 0}
+</style>
+<p id="unrelated">Weather: sunny</p>
+<form id="booking" onsubmit="return false">
+  <p id="scope">Total $10</p>
+  <input id="name" aria-label="Traveller name" value="Ada">
+  <button type="button" id="go" onclick="window.clicks=(window.clicks||0)+1">Continue</button>
+  <select id="category" aria-label="Category">
+    <option value="">Choose</option>
+    <option id="first" value="same">Same</option>
+    <option id="second" value="same">Same</option>
+    <option id="other" value="other">Other</option>
+  </select>
+  <select id="owner" aria-label="Another dropdown"><option value="">Other owner</option></select>
+  <input id="offscreen" aria-label="Offscreen note" value="kept">
+</form>
+<ul id="rows">
+  <li id="row-one"><span>Row one: 09:00</span><button type="button" id="book-one">Book</button></li>
+  <li id="row-two"><span>Row two: 11:00</span><button type="button" id="book-two">Book</button></li>
+</ul>
+<div id="grid"></div>
+<div id="spacer" style="height:10px"></div>
+<script>
+// 255 seats on a fixed grid in view, labelled without visible text: the last ones are omitted from a read's 250.
+const grid=document.querySelector('#grid');
+for (let i=0;i<255;i++) {
+  const seat=document.createElement('button');
+  seat.type='button';
+  seat.setAttribute('aria-label','Seat '+(i+1));
+  seat.style.left=(i%80)*14+'px';
+  seat.style.top=Math.floor(i/80)*14+'px';
+  grid.append(seat);
+}
+window.events=[];
+for (const type of ['input','change']) document.addEventListener(type,event=>window.events.push(
+  {event:type,id:event.target.id,index:event.target.selectedIndex}));
+</script>
