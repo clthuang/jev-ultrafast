@@ -68,6 +68,8 @@ def main():
     finally:
         state = agent.snapshot()
         state["verification"] = verify(state["page"])
+        state["verification"]["checks"]["fresh_page"] = state.get("page_fresh", True)
+        state["verification"]["passed"] = all(state["verification"]["checks"].values())
         (folder / "state.json").write_text(json.dumps(state, indent=2))
         (folder / "session.json").write_text(
             json.dumps({"target": agent.browser.target, "session": agent.browser.session})

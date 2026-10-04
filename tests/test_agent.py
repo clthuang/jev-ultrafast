@@ -1,5 +1,6 @@
 """Offline contracts for a dynamic operation/target policy. No paid APIs."""
 
+import contextlib
 import json
 import time
 from copy import deepcopy
@@ -239,7 +240,8 @@ def runner():
     a.trace_path = None
     a.before_input = None
     p = page()
-    a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p))
+    a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p),
+                     draining=contextlib.nullcontext, wait_for_loading=Mock(return_value=None))
     # The real builder, so every state key the Agent adds is present here too.
     a._fresh_state("Find a book", p, None, allowed_operations=ALL_OPERATIONS)
     a.state.update(decision=decision(), status="predicted", started_at=time.perf_counter())
@@ -279,7 +281,7 @@ def test_changed_field_context_does_not_reuse_generated_text(runner, monkeypatch
     assert helper.call_count == 2
 
 
-def test_loading_waits_do_not_trigger_no_progress_stop(runner):
+def test_wait_steps_do_not_trigger_no_progress_stop(runner):
     # Five unchanged steps, never three clicks in a row: a WAIT breaks the no-progress count, and one WAIT stays below
     # the count that hands the run back to Claude (docs/executor-improvements.md §5).
     for action in ("e3", "e3", "wait", "e3", "e3"):
@@ -368,9 +370,11 @@ def test_stale_observation_preserves_executed_action(runner):
 
 
 def test_observation_is_one_atomic_browser_read(monkeypatch):
+    from test_execution_contracts import observed_page
+
     import jev_ultrafast.browser as browser
 
-    p = page()
+    p = observed_page()
     cdp = Mock(return_value={"result": {"value": p}})
     monkeypatch.setattr(browser, "cdp", cdp)
     actual = browser_operation({"operation": "observe", "session": "test", "screenshot": False})
@@ -543,11 +547,12 @@ def test_dismiss_dialog_never_accepts(monkeypatch, error, dismissed):
 def test_hit_test_names_what_covers_the_target(monkeypatch, hit, message):
     import jev_ultrafast.browser as browser
 
-    cdp = Mock(return_value={"result": {"value": hit}})
+    cdp = Mock(side_effect=[{"result": {"value": True}}, {"result": {"value": hit}}])
     monkeypatch.setattr(browser, "cdp", cdp)
     with pytest.raises(StalePage) as stale:
-        browser_operation({"operation": "act", "session": "test", "action": page()["actions"][0], "text": "book"})
-    assert str(stale.value) == message and cdp.call_count == 1  # rejected before any input
+        browser_operation({"operation": "act", "session": "test", "action": page()["actions"][0], "text": "book",
+                           "snapshot_schema": 2, "observation_token": {"epoch": "fixture", "generation": 1}})
+    assert str(stale.value) == message and cdp.call_count == 2  # rejected before any input
 
 
 @pytest.mark.parametrize(
@@ -562,7 +567,8 @@ def test_interrupted_dropdown_mutation_cannot_be_retried_as_stale(monkeypatch, r
     cdp = Mock(return_value=response)
     monkeypatch.setattr(browser, "cdp", cdp)
     with pytest.raises(RuntimeError, match="Dropdown execution"):
-        browser_operation({"operation": "act", "session": "test", "action": {
+        browser_operation({"operation": "act", "session": "test", "snapshot_schema": 2,
+                           "observation_token": {"epoch": "fixture", "generation": 1}, "action": {
             "id": "e1", "kind": "select", "node": 1, "value": "Design",
         }})
     assert cdp.call_count == 1
@@ -701,18 +707,20 @@ def act(runner, action="e3", **decision_fields):
 def test_new_goal_resets_every_counter(runner):
     browser = runner.browser
     runner.state.update(
-        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5
+        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5,
+        repeated_reads=2, loading_waits=[[748, False, False]],
     )
     runner.new_goal("  Open the cart  ", allowed_sites=["shop.test"], allowed_operations=ALL_OPERATIONS)
     state = runner.state
     assert (state["history"], state["decisions"], state["text_calls"], state["stale_decisions"]) == ([], [], [], 0)
-    assert state["stale_streak"] == 0
+    assert state["stale_streak"] == 0 and state["repeated_reads"] == 0 and state["loading_waits"] == []
     assert state["decision"] is None and state["status"] == "ready" and state["attempt"] is None
     assert state["allow_commit"] is False
     assert state["started_at"] is None and state["elapsed_ms"] == 0
     assert state["goal"] == "Open the cart" and state["allowed_sites"] == ["example.test", "shop.test"]
     assert state["browser"] is browser
     browser.observe.assert_called_once()
+    browser.reset_loading.assert_called_once()
 
 
 def test_tick_survives_a_slow_navigation(runner):

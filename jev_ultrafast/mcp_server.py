@@ -24,7 +24,7 @@ from mcp.server.mcpserver import Image
 
 from . import run_store, site_notes
 from .agent import Agent
-from .browser import UncertainAction
+from .browser import InvalidSnapshot, SnapshotTooLarge, UncertainAction
 from .contracts import RunStopped, token_usage, validate_allowed_operations, validate_goal
 from .demo import load_environment
 from .model import action_space
@@ -145,6 +145,8 @@ def start_run(goal, url, allowed_operations, allowed_sites, allow_commit, foregr
     else:
         try:
             AGENT.new_goal(goal, allowed_operations=allowed_operations, **options)
+        except (SnapshotTooLarge, InvalidSnapshot) as error:
+            return [f"stopped: {error}"]
         except Exception as error:
             try:
                 open_tab = any(t["targetId"] == AGENT.browser.target for t in cdp("Target.getTargets")["targetInfos"])
@@ -243,10 +245,16 @@ def finish(agent, run_id, notes):
         return remaining
 
     try:
-        page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False,
-                                     check_stop=final_remaining, remaining_budget=final_remaining)
-        image = base64.b64decode(page.pop("screenshot"))
-        state["page"] = page  # the run file ends with the final page
+        if state.get("stop_code") in {"snapshot_too_large", "snapshot_protocol_error"}:
+            notes.append(f"fresh read skipped: terminal {state["stop_code"]}")
+        else:
+            page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False,
+                                         check_stop=final_remaining, remaining_budget=final_remaining)
+            image = base64.b64decode(page.pop("screenshot"))
+            state["page"] = page  # the run file ends with the final page
+    except (SnapshotTooLarge, InvalidSnapshot) as error:
+        agent.mark_snapshot_invalid(error.code)
+        notes.append(f"fresh read failed: {error}")
     except Exception as error:
         image = None  # the result falls back to the last page read, marked not fresh
         notes.append(f"fresh read failed: {error}")

@@ -1,7 +1,7 @@
 // Small DOM adapter: production snapshot.js and atomic SELECT code execute unchanged against these nodes.
 module.exports = function createDOM(config = {}) {
   global.window = global;
-  global.performance = {timeOrigin: 123456};
+  global.performance = {timeOrigin:123456, now:()=>require('node:perf_hooks').performance.now()};
   global.crypto = require('node:crypto').webcrypto;
   global.innerWidth = 1120; global.innerHeight = 780; global.scrollX = 0; global.scrollY = 0;
   global.NodeFilter = {SHOW_TEXT: 4};

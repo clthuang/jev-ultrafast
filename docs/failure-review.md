@@ -1,5 +1,8 @@
 # Failure log, review and site protocols
 
+> Current implementation note (2026-10-04): use the [current contracts](robustness-efficiency/current-contracts.md) for current operational behavior and storage migration. Historical designs, examples and trial evidence below are retained; a recorded historical result does not prove this candidate.
+
+
 **Status:** design v4.4, approved by the user on 2026-09-26, with their decisions in §12 and v4.4's; implemented on
 2026-09-29, as `docs/failure-review-plan.md` lays out. The first review ran that day, for $0.07.
 
@@ -450,7 +453,7 @@ titles, labels and stop notes are page text.
 ### 7.3 On request
 
 "Review Jev runs": Claude in your session runs `review_runs.py queue`, reviews the summaries itself, and passes its
-decisions to `review_runs.py apply`. That is today's review on request with code's checks added, and it sends less
+decisions to `review_runs.py apply --batch BATCH_ID`. That is today's review on request with code's checks added, and it sends less
 than today's version, which reads whole run files.
 
 ### 7.4 Automatic (on)

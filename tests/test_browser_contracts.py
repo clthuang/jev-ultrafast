@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from readiness_fakes import attach_quiet_loading_source
 
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser, model
@@ -44,7 +45,7 @@ const dom=require(process.argv[1])(JSON.parse(process.argv[2]));
 const snapshot=fs.readFileSync(process.argv[3],'utf8');
 const page=eval(snapshot);
 const action=page.actions.find(a=>a.kind==='select' && a.option.observed_index===3);
-const payload=action ? {action,page_key:page.page_key,guard:page.guards[action.node]} : null;
+const payload=action ? {action,snapshot_schema:page.snapshot_schema,observation_token:page.observation_token} : null;
 eval(process.argv[4]);
 const result=payload ? eval(process.argv[5])(payload) : null;
 const after=eval(snapshot);
@@ -116,7 +117,7 @@ def test_select_protocol_epoch_is_not_progress():
     before, after = result["page"], result["after"]
     assert before["actions"][0]["option"]["cache_epoch"] != after["actions"][0]["option"]["cache_epoch"]
     assert browser.fingerprint(before) == browser.fingerprint(after)
-    assert before["marker"] != after["marker"]
+    assert before["observation_token"] != after["observation_token"]
 
 
 UNCERTAIN_RESPONSES = [
@@ -134,6 +135,7 @@ def test_select_uncertainty_never_retries(monkeypatch, tmp_path, response):
     page["fingerprint"] = browser.fingerprint(page)
     selected = next(action for action in page["actions"] if action.get("option", {}).get("observed_index") == 3)
     real_browser = browser.Browser.__new__(browser.Browser)
+    attach_quiet_loading_source(real_browser)
     real_browser.session = "fake-session"
     real_browser.observe = Mock(return_value=page)
     real_browser.fresh = Mock(side_effect=AssertionError("SELECT freshness must be inside its atomic evaluation"))
@@ -176,7 +178,8 @@ def test_only_tagged_preinput_rejection_is_stale(monkeypatch):
     monkeypatch.setattr(browser, "cdp", dispatch)
     with pytest.raises(browser.StalePage, match="changed"):
         browser.browser_operation({"operation": "act", "session": "S", "action": action,
-                                   "page_key": page["page_key"], "guard": page["guards"][str(action["node"])]})
+                                   "snapshot_schema": page["snapshot_schema"],
+                                   "observation_token": page["observation_token"]})
     assert dispatch.call_count == 1
 
 

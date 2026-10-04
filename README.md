@@ -136,12 +136,15 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
+| [readiness.py](jev_ultrafast/readiness.py) | Owned CDP event source and lifecycle |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
 | [mcp_server.py](jev_ultrafast/mcp_server.py) | Claude Code tools: `run_goal`, `report_outcome` and `show_window` |
 | [site_notes.py](jev_ultrafast/site_notes.py) | Failure codes, next steps, and site notes for Claude, never for the executor |
 | [review_runs.py](scripts/review_runs.py) | Reviews of recorded runs, and note approval |
+| [review_records.py](jev_ultrafast/review_records.py) | Versioned batches, attempts and committed digests |
+| [run_store.py](jev_ultrafast/run_store.py) | Atomic run updates that preserve outcome history |
 
 ## Evidence and limits
 
@@ -154,6 +157,12 @@ At that commit, the policy opened the requested Wikipedia article in **2.798 s**
 On 2026-09-24, after the Claude Code changes, six re-measured runs all passed but took 64–185 s. TypeSafe was slow that day: even one-question requests took a median 4.4 s, against 178 ms per decision in the recording. The per-target commit questions add 82% more input tokens per request; their latency effect was not resolved. The dated note in performance.md has the details.
 
 A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP; `run_goal` closes and reports pop-up tabs instead of following them, and dismisses JavaScript dialogs without accepting them. A pop-up still brings Chrome to the front before it is closed. Owned tabs share the existing Chrome profile.
+
+## Robustness and efficiency candidate
+
+The current implementation enforces explicit operation policies and cooperative execution limits, preserves outcome corrections, and uses durable versioned review batches and receipts. Browser observations use schema 2 with at most 250 target guards and 262,144 UTF-8 transport bytes (screenshots excluded). Oversize or malformed observations stop execution explicitly; old cached pages are diagnostic. The loading observer owns its CDP connection and event queue, and only post-step observation timeouts receive up to two extra reads after execution is saved.
+
+See [current contracts](docs/robustness-efficiency/current-contracts.md) and [activation and compatible rollback](docs/robustness-efficiency/activation-runbook.md). Old list-only note writers must be quiesced before activating schema-2 note envelopes. Candidate/native-fixture verification does not establish production activation, paid-provider billing behavior or real-site speed; the earlier performance recordings remain historical.
 
 ## Development
 

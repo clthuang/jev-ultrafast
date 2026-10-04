@@ -1,13 +1,12 @@
 (() => {
   if (!document.body) return null;
-  const MAX_TARGET_ACTIONS=250, MAX_SNAPSHOT_BYTES=262144;
-  if (window.__jevFast?.schema!==2) window.__jevFast={schema:2,ids:new WeakMap(),nodes:new Map(),next:1,generation:0};
-  const cache=window.__jevFast;
+  const cache = window.__jevFast ||= {ids:new WeakMap(), nodes:new Map(), next:1};
   cache.epoch ||= [...crypto.getRandomValues(new Uint32Array(4))].join('-');
   const identity = e => {
     if (!cache.ids.has(e)) cache.ids.set(e,cache.next++);
-    return cache.ids.get(e);
+    const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
   };
+  for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
   const safe = e => !['password','file','hidden'].includes(e.type);
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
@@ -43,34 +42,19 @@
     }
     return null;
   };
-  const pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
+  cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
       .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly,
         e.tagName==='SELECT' && e.multiple ? [...e.selectedOptions].map(o=>[identity(o),o.label,o.value]) : null])];
-  const scan=generation=>{
-    const started=performance.now(), scopes=new Map(), guards=new Map(), offeredNodes=new Map();
-    const counts={guard_builds:0,scope_reads:0,strong_references:0,offered_actions:0,observed_actions:0};
-    const guard=e=>{
-      if (!e?.isConnected || !visible(e)) return null;
-      counts.guard_builds++;
-      const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
-      if (!scopes.has(scope)) {
-        scopes.set(scope,scope?.innerText?.slice(0,6000)||'');
-        counts.scope_reads++;
-      }
-      return [identity(e),role(e),name(e),e.value??null,e.checked??null,e.selectedIndex??null,
-        e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
-        e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
-        e.getAttribute('href'),scopes.get(scope)];
-    };
-  const actions=[], evidence=[];
-  const offer=(action,control,option)=>{
-    if (actions.length<MAX_TARGET_ACTIONS) {
-      offeredNodes.set(action.node,control);
-      if (option) offeredNodes.set(action.option.option_id,option);
-    }
-    actions.push(action);
+  cache.guard=e=>{
+    if (!e?.isConnected || !visible(e)) return null;
+    const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
+    return [identity(e),role(e),name(e),e.value??null,e.checked??null,e.selectedIndex??null,
+      e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
+      e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
+      e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
+  const actions=[], evidence=[];
   for (const e of document.querySelectorAll(selector)) {
     if (e.tagName!=='SELECT' && e.closest('select')) continue;
     if (!safe(e) || !visible(e)) continue;
@@ -96,9 +80,9 @@
       for (const [observed_index,o] of [...e.options].entries()) {
         const effective_disabled=e.matches(':disabled') || o.disabled || !!o.closest('optgroup[disabled]');
         if (!o.selected && !effective_disabled)
-          offer({...base,kind:'select',value:o.value,current_value,label:base.label+' → '+o.label,
+          actions.push({...base,kind:'select',value:o.value,current_value,label:base.label+' → '+o.label,
             option:{select_id:base.node,option_id:identity(o),observed_index,label:o.label,value:o.value,
-              selected:o.selected,effective_disabled,document_id:performance.timeOrigin,cache_epoch:cache.epoch}},e,o);
+              selected:o.selected,effective_disabled,document_id:performance.timeOrigin,cache_epoch:cache.epoch}});
       }
     } else {
       const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
@@ -106,8 +90,8 @@
           (rname==='combobox' && ['INPUT','TEXTAREA'].includes(e.tagName)));
       const value='value' in e ? String(e.value) :
         e.isContentEditable || rname==='combobox' ? e.innerText.trim() : '';
-      offer({...base,kind:editable?'fill':'click',value},e);
-      if (editable) offer({...base,kind:'click',value,label:'Open '+base.label},e);
+      actions.push({...base,kind:editable?'fill':'click',value});
+      if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
@@ -121,54 +105,18 @@
     }
   }
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
-  const page_key=pageKey();
+  const page_key=cache.pageKey(), guards={};
+  for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
   // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
   const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     document.title,text,semantics,evidence.map(({rect,...item})=>item),page_key[6]];
-  counts.observed_actions=actions.length;
-  const omitted_actions=Math.max(0,actions.length-MAX_TARGET_ACTIONS);
-  actions.splice(MAX_TARGET_ACTIONS);
-  counts.offered_actions=actions.length;
-  for (const a of actions) if (!guards.has(a.node)) guards.set(a.node,guard(offeredNodes.get(a.node)));
-  actions.forEach((a,i)=>{
-    a.id='e'+(i+1);
-    a.guard_ref={epoch:cache.epoch,generation,node:a.node};
-  });
+  const omitted_actions=Math.max(0,actions.length-250);
+  actions.splice(250);
+  actions.forEach((a,i)=>a.id='e'+(i+1));
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
-  counts.strong_references=offeredNodes.size;
-  const observation_token={epoch:cache.epoch,generation};
-  const page={snapshot_schema:2,observation_token,url:location.href,title:document.title,
-    w:innerWidth,h:innerHeight,text,scroll:{y:scrollY,height},actions,evidence,omitted_actions,diagnostics:counts};
-  const scan_ms=performance.now()-started, serializationStarted=performance.now();
-  const bytes=new TextEncoder().encode(JSON.stringify(page)).byteLength;
-  cache.last_scan={...counts,bytes,scan_ms,serialization_ms:performance.now()-serializationStarted};
-  if (bytes>MAX_SNAPSHOT_BYTES) {
-    cache.baseline=null; cache.nodes=new Map();
-    return {overflow:{snapshot_schema:2,status:'snapshot_too_large',attempted_bytes:bytes,diagnostics:counts}};
-  }
-  return {page,marker,page_key,guards,nodes:offeredNodes};
-  };
-  const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
-  cache.check=({snapshot_schema,observation_token,action=null})=>{
-    const baseline=cache.baseline;
-    if (snapshot_schema!==2 || !baseline || !same(observation_token,baseline.page.observation_token) ||
-        baseline.document!==document || cache!==window.__jevFast) return false;
-    if (action && (!baseline.page.actions.some(offered=>same(offered,action)) ||
-        (action.node!==undefined && !same(action.guard_ref,{...observation_token,node:action.node})))) return false;
-    const current=scan(observation_token.generation);
-    if (current.overflow) return current.overflow;
-    if (action && ['click','select'].includes(action.kind))
-      return same(current.page_key,baseline.page_key) && current.guards.has(action.node) &&
-        same(current.guards.get(action.node),baseline.guards.get(action.node));
-    return same(current.marker,baseline.marker);
-  };
-  const current=scan(cache.generation+1);
-  if (current.overflow) return current.overflow;
-  cache.generation++;
-  cache.nodes=current.nodes;
-  cache.baseline={...current,document};
-  return current.page;
+  return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
+    scroll:{y:scrollY,height},actions,evidence,marker,page_key,guards,omitted_actions};
 })()

@@ -1,5 +1,8 @@
 # Robustness and efficiency proposal
 
+> Current implementation note (2026-10-04): the robustness/efficiency candidate implements the policy, execution limits, versioned review storage, bounded snapshots and readiness contracts. See the [current contracts](robustness-efficiency/current-contracts.md) and its evidence/activation links. The design, planning statuses, trial counts and performance observations below are historical; they are not current release or production-activation proof.
+
+
 Status: reviewed proposal, ready for implementation planning; not implemented. Revision 3, 2026-10-03.
 
 Baseline: `60f03037a713dbce10f46da015fbffccc9132fa5`, branch `executor-improvements-design`.

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import builtins
+import contextlib
 import fcntl
 import importlib
 import io
@@ -57,6 +58,15 @@ class FakeBrowser:
     dialog = False
     read_error = None
     closed = False
+
+    def reset_loading(self):
+        pass
+
+    def draining(self):
+        return contextlib.nullcontext()
+
+    def wait_for_loading(self, **_control):
+        return None
 
     def observe(self, screenshot=True, **_control):
         if self.read_error:
@@ -361,6 +371,39 @@ def test_cancellation_during_the_decision_executes_no_input(monkeypatch):
     assert run["result"]["notes"] == ["cancelled"] and len(run["decisions"]) == 1
     assert run["history"] == [] and run["attempt"] is None
     inputs.assert_not_called()
+
+
+def test_a_read_that_timed_out_after_a_click_is_repeated(monkeypatch):
+    inputs, decisions, reads, final_reads = [], [], [], []
+    original = FakeBrowser.observe
+
+    def choose(*args, **kwargs):
+        selected = "e2" if not decisions else "DONE"
+        decisions.append(selected)
+        return {"choice": selected, "operation": "CLICK" if selected == "e2" else "DONE",
+                "target": "2" if selected == "e2" else None, "confidence": 1,
+                "probabilities": {selected: 1}, "latency_ms": 10, "usage": {}}
+
+    def observe(self, screenshot=True, **control):
+        if screenshot:
+            final_reads.append(True)
+        elif AGENTS and AGENTS[-1].state["history"]:
+            reads.append(True)
+            assert len(run_file()["history"]) == 1
+            if len(reads) == 1:
+                raise TimeoutError("renderer read timed out")
+        return original(self, screenshot=screenshot, **control)
+
+    monkeypatch.setattr("jev_ultrafast.agent.choose", choose)
+    monkeypatch.setattr(FakeAgent, "_command", Agent._command)
+    monkeypatch.setattr(FakeBrowser, "fresh", lambda *args, **kwargs: True, raising=False)
+    monkeypatch.setattr(FakeBrowser, "act", lambda *args, **kwargs: inputs.append(True), raising=False)
+    monkeypatch.setattr(FakeBrowser, "observe", observe)
+    assert " · done · " in mcp_server.run_goal("Search", url=URL, allowed_operations=["CLICK"])[0]
+    run = run_file()
+    assert inputs == [True] and len(reads) == 2 and len(final_reads) == 1
+    assert run["repeated_reads"] == 1 and len(run["history"]) == 1
+    assert run["history"][0]["page_changed"] is False
 
 
 def test_popup_stops_with_its_url():

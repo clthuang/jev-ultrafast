@@ -1,5 +1,8 @@
 # Independent review, validation and premortem
 
+> Current implementation note (2026-10-04): the robustness/efficiency candidate implements the policy, execution limits, versioned review storage, bounded snapshots and readiness contracts. See the [current contracts](robustness-efficiency/current-contracts.md) and its evidence/activation links. The design, planning statuses, trial counts and performance observations below are historical; they are not current release or production-activation proof.
+
+
 Date: 2026-10-03. Scope: [robustness and efficiency proposal](robustness-efficiency-proposal.md).
 Implementation baseline: `60f03037a713dbce10f46da015fbffccc9132fa5`.
 Status: all three independent passes complete; no unresolved design blockers. No implementation has been changed.

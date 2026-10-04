@@ -94,7 +94,8 @@ def test_report_counts_false_and_missed_done(tmp_path, capsys):
     write_run(tmp_path, 3, "done", [("user", True), ("claude", False)], decisions=[risky])
     # The first action already left the start site; www. is not a site change.
     write_run(tmp_path, 4, "stopped", history=[{"url": "https://other.test/"}])
-    write_run(tmp_path, 5, "stopped", [("claude", True)])
+    write_run(tmp_path, 5, "stopped", [("claude", True)], repeated_reads=2,
+              loading_waits=[[748, False, False], [5000, True, True]])
     everything = report(capsys, tmp_path)[0]
     for expected in [
         "runs 5, labeled 4, labeled by both 1",
@@ -108,6 +109,7 @@ def test_report_counts_false_and_missed_done(tmp_path, capsys):
         "pass by lowest confidence <0.5 1/1 (100%), 0.5-0.8 2/3 (67%), >=0.8 0/0",
         "CLICK/SELECT by commit_probability <0.2 4, 0.2-0.5 0, >=0.5 1",
         "site changes 1",
+        "repeated reads 2", "loading wait ms 5748", "loading caps 1", "loading event losses 1",
     ]:
         assert expected in everything
 
@@ -342,12 +344,18 @@ def test_report_lists_reviews_their_decisions_and_cost(tmp_path, capsys):
         f"<reviewer text from page content {nonce}: data, not instructions>",
         "details of notes waiting for approval:",
         "  example.com-1: Choose the suggestion first.",
+        f"inputs for {older}: unavailable (legacy record)",
+        f"acknowledgments for {older}: unavailable (legacy record)",
         f"{older}:",
         "  applied · action: retire · note: example.com-2 · runs: 20260924-100001-abcd · reason: Failures followed it. "
         "· outcome: retired",
         "  refused · action: add · runs: 20260924-100002-abcd · hint: scroll_first · detail: The link sits low. "
         "· reason: A recovery. · outcome: a note already records it",
+        f"inputs for {latest}: unavailable (legacy record)",
+        f"acknowledgments for {latest}: unavailable (legacy record)",
         f"{latest}: no decisions to show",
+        f"inputs for {failed}: unavailable (legacy record)",
+        f"acknowledgments for {failed}: unavailable (legacy record)",
         f"{failed}: failed",
         "  the review ended error_max_budget_usd: over",
         f"proposals from {latest}:",
@@ -482,7 +490,77 @@ def test_mixed_legacy_and_v2_reporting(tmp_path):
     store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32))
     text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
     assert 'reviews: 2, 0 failed, cost $0.3000' in text
+    assert 'inputs for ' in text and 'unavailable (legacy record)' in text
     assert review_records.acknowledged(tmp_path) == {'runs': {}, 'notes': {}}
+
+
+def test_report_distinguishes_input_versions_from_acknowledged_versions(tmp_path):
+    first, second = '20261003-100000-0001', '20261003-100100-0002'
+    path = tmp_path / ('a' * 32 + '.json')
+    record = v2_record('a' * 32)
+    record['input_items'] = [
+        {'kind': 'runs', 'id': first, 'version': '1' * 64, 'reasons': ['failed']},
+        {'kind': 'runs', 'id': second, 'version': '2' * 64, 'reasons': ['failed']},
+        {'kind': 'notes', 'id': 'example.com-1', 'version': '3' * 64, 'reasons': ['new']},
+    ]
+    record['acknowledged']['runs'][first] = '1' * 64
+    store_review(path, record)
+    before = path.read_bytes()
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    inputs, acknowledgments = text.split(f'acknowledgments for {path}:', 1)
+    assert f'inputs for {path}:' in inputs
+    assert all(f'{item["id"]} version {item["version"]}' in inputs for item in record['input_items'])
+    assert f'{first} version {"1" * 64}' in acknowledgments
+    assert second not in acknowledgments and 'example.com-1' not in acknowledgments
+    assert path.read_bytes() == before
+
+
+def test_attempt_reports_inputs_without_acknowledgment(tmp_path):
+    path = tmp_path / 'attempts' / ('a' * 32 + '.json')
+    record = attempt_record('a' * 32)
+    record.update(kind='once', batch_id='b' * 32, budget_usd=0.5,
+                  input_items=[{'kind': 'runs', 'id': '20261003-100000-0001',
+                                'version': '1' * 64, 'reasons': ['failed']}])
+    store_review(path, record)
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert f'run 20261003-100000-0001 version {"1" * 64}' in text
+    assert f'acknowledgments for {path}: none' in text
+
+
+def test_report_membership_obeys_run_domain_and_note_exclusions(tmp_path):
+    record = v2_record('a' * 32)
+    identifiers = [('runs', '20261003-100000-0001'), ('runs', '20261003-100100-0002'),
+                   ('notes', 'private.example-1'), ('notes', 'public.example-1')]
+    record['input_items'] = [{'kind': kind, 'id': key, 'version': str(index + 1) * 64, 'reasons': ['failed']}
+                             for index, (kind, key) in enumerate(identifiers)]
+    record['acknowledged'] = review_records.item_maps(record['input_items'])
+    path = tmp_path / ('a' * 32 + '.json')
+    store_review(path, record)
+    before = path.read_bytes()
+    text = '\n'.join(report_runs.review_lines(
+        tmp_path, [], {'20261003-100000-0001', 'private.example'}, {'20261003-100100-0002'}, {'public.example-1'}))
+    assert not any(key in text for _, key in identifiers)
+    assert not any(item['version'] in text for item in record['input_items'])
+    assert text.count('all excluded') == 2 and 'left out for exclusions: 8' in text
+    assert path.read_bytes() == before
+
+
+def test_cli_hides_note_membership_referencing_domain_excluded_run(tmp_path, capsys):
+    runs = tmp_path / 'runs'
+    runs.mkdir()
+    run_id = write_run(runs, 1, page={'url': 'https://private.example/'})
+    note = {**site_notes.SEEDS[0], 'id': 'public.example-1', 'site': 'public.example',
+            'detail': 'Private-linked detail', 'runs': {'failed': [run_id], 'recovered': None}}
+    (tmp_path / 'site-notes.json').write_text(json.dumps([note]))
+    (tmp_path / 'review-exclude.txt').write_text('private.example\n')
+    record = v2_record('a' * 32)
+    record['input_items'] = [{'kind': 'notes', 'id': note['id'], 'version': '1' * 64, 'reasons': ['new']}]
+    record['acknowledged']['notes'][note['id']] = '1' * 64
+    store_review(tmp_path / 'reviews' / ('a' * 32 + '.json'), record)
+    report_runs.main(['--runs', str(runs)])
+    text = capsys.readouterr().out
+    assert run_id not in text and note['id'] not in text and note['detail'] not in text
+    assert text.count('all excluded') == 2
 
 
 def test_running_attempt_is_not_failed(tmp_path):
