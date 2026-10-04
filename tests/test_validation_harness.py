@@ -312,6 +312,53 @@ def test_process_identity_uses_kernel_birth_time():
     assert lab.process_identity(os.getpid()) == current
 
 
+def test_process_identity_ignores_terminal_width(monkeypatch):
+    # pytest's environment can narrow ps output; a truncated command must not read as a different process.
+    wide = lab.process_identity(os.getpid())
+    monkeypatch.setenv("COLUMNS", "20")
+    assert lab.process_identity(os.getpid()) == wide
+
+
+def test_linux_identity_reads_proc_and_treats_exiting_processes_as_exited(monkeypatch):
+    stat = "1234 (python3) S 1 1234 1234 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0"
+    files = {"stat": [stat], "cmdline": b"python3\x00-m\x00owned daemon\x00",
+             "status": "Name:\tpython3\nUid:\t501\t501\t501\t501\n"}
+
+    def read(path):
+        assert str(path).startswith("/proc/1234/")
+        value = files[Path(path).name]
+        if isinstance(value, list):  # successive reads of stat: before and after the other files
+            return value.pop(0) if len(value) > 1 else value[0]
+        return value
+
+    monkeypatch.setattr(lab.sys, "platform", "linux")
+    monkeypatch.setattr(lab.Path, "read_text", lambda path, *args, **kwargs: read(path))
+    monkeypatch.setattr(lab.Path, "read_bytes", lambda path: read(path))
+    monkeypatch.setattr(lab.subprocess, "run", Mock(side_effect=AssertionError("ps must not run on Linux")))
+    assert lab.process_identity(1234) == {"pid": 1234, "birth": "98765", "uid": 501,
+                                          "command": "python3 -m owned daemon"}
+    files["cmdline"] = b""  # exiting: argv is gone before the zombie state shows
+    assert lab.process_identity(1234) is None
+    files["cmdline"] = b"python3\x00owned"
+    files["stat"] = [stat, stat.replace(" S ", " Z ")]  # became a zombie between reads
+    assert lab.process_identity(1234) is None
+    files["stat"] = [stat, stat.replace(" 98765 ", " 98766 ")]  # PID reused between reads
+    assert lab.process_identity(1234) is None
+
+
+def test_lab_chrome_is_explicit_and_root_only_drops_the_sandbox(monkeypatch, tmp_path):
+    chrome = tmp_path / "chrome"
+    monkeypatch.setenv("JEV_LAB_CHROME", str(chrome))
+    assert lab.default_chrome() == chrome
+    monkeypatch.delenv("JEV_LAB_CHROME")
+    monkeypatch.setattr(lab.shutil, "which", Mock(side_effect=AssertionError("never search PATH for a browser")))
+    assert lab.default_chrome() in {lab.MACOS_CHROME, lab.PLAYWRIGHT_CHROMIUM}
+    monkeypatch.setattr(lab.os, "geteuid", lambda: 0)
+    assert lab.chrome_sandbox_flags() == ["--no-sandbox"]
+    monkeypatch.setattr(lab.os, "geteuid", lambda: 501)
+    assert lab.chrome_sandbox_flags() == []
+
+
 def test_production_trigger_cannot_reach_candidate_writers_or_state(tmp_path, monkeypatch):
     """A late production trigger resolves its own cwd script, not a nested candidate writer."""
     from jev_ultrafast import mcp_server

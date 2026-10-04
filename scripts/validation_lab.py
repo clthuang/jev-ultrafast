@@ -25,10 +25,28 @@ from urllib.parse import parse_qs, urlparse
 
 SCHEMA_VERSION = 1
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+MACOS_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+# Playwright's Chromium, preinstalled in Linux containers such as Claude Code on the web.
+PLAYWRIGHT_CHROMIUM = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")) / "chromium"
 PROCESS_WAIT_SECONDS = 5
 STARTUP_SECONDS = 30
 PROXY_LIMIT_BYTES = 4 * 1024 * 1024
+
+
+def default_chrome():
+    """An explicit lab Chrome: JEV_LAB_CHROME, else a fixed install path. Never the user's running browser."""
+    configured = os.environ.get("JEV_LAB_CHROME")
+    if configured:
+        return Path(configured)
+    for candidate in (MACOS_CHROME, PLAYWRIGHT_CHROMIUM):
+        if candidate.is_file():
+            return candidate
+    return MACOS_CHROME
+
+
+def chrome_sandbox_flags():
+    """Chrome refuses to start as root with its sandbox; root here means a disposable container."""
+    return ["--no-sandbox"] if hasattr(os, "geteuid") and os.geteuid() == 0 else []
 
 
 def chrome_network_flags(proxy_port):
@@ -57,6 +75,24 @@ class _BsdProcessInfo(ctypes.Structure):
     ]
 
 
+def _linux_process_identity(pid):
+    """Read /proc directly: ps truncates to COLUMNS and can catch an exiting process between its own reads."""
+    proc = Path(f"/proc/{pid}")
+    try:
+        before = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+        argv = (proc / "cmdline").read_bytes()
+        status = (proc / "status").read_text()
+        after = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    # An exiting process loses its argv before it becomes a zombie; a changed start time is a reused PID.
+    if after[0] in {"Z", "X"} or not argv or before[19] != after[19]:
+        return None
+    uid = next(int(line.split()[1]) for line in status.splitlines() if line.startswith("Uid:"))
+    command = " ".join(os.fsdecode(part) for part in argv.rstrip(b"\0").split(b"\0"))
+    return {"pid": pid, "birth": after[19], "uid": uid, "command": command}
+
+
 def process_identity(pid):
     """Read identity without trusting a PID file; None means the process has exited."""
     if type(pid) is not int or pid <= 1:
@@ -73,17 +109,11 @@ def process_identity(pid):
             return None
         birth = f"{info.start_seconds}:{info.start_microseconds}"
     elif sys.platform.startswith("linux"):
-        try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
-            return None
-        if fields[0] == "Z":
-            return None
-        birth = fields[19]
+        return _linux_process_identity(pid)
     else:
         raise LabSafetyError("Native lab process verification supports macOS and Linux")
     result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "uid=,command="], capture_output=True, text=True, timeout=2, check=False,
+        ["ps", "-ww", "-p", str(pid), "-o", "uid=,command="], capture_output=True, text=True, timeout=2, check=False,
     )
     if not result.stdout.strip():
         return None
@@ -355,9 +385,9 @@ def _spawn_owned(role, command, *, root, environment, manifest, output, children
         raise
 
 
-def prepare(output, chrome=DEFAULT_CHROME, fixtures=None):
+def prepare(output, chrome=None, fixtures=None):
     """The sole browser-launch path. Record owned processes immediately for bounded cleanup."""
-    output, chrome = Path(output).absolute(), Path(chrome).resolve()
+    output, chrome = Path(output).absolute(), Path(chrome or default_chrome()).resolve()
     if output.exists() or not chrome.is_file():
         raise LabSafetyError("Refusing an existing manifest or a missing Chrome executable")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -409,8 +439,9 @@ def prepare(output, chrome=DEFAULT_CHROME, fixtures=None):
         manifest["proxy_port"] = ready["port"]
         _listener_owned(manifest["processes"]["proxy"]["pid"], manifest["proxy_port"])
         _write_manifest(output, manifest)
-        spawn("chrome", [str(chrome), "--headless=new", "--enable-automation", "--no-first-run",
-                         "--no-default-browser-check", "--disable-sync", "--disable-background-networking",
+        spawn("chrome", [str(chrome), *chrome_sandbox_flags(), "--headless=new", "--enable-automation",
+                         "--no-first-run", "--no-default-browser-check", "--disable-sync",
+                         "--disable-background-networking",
                          "--disable-component-update", "--remote-debugging-address=127.0.0.1",
                          "--remote-debugging-port=0", f"--user-data-dir={manifest['profile']}",
                          *chrome_network_flags(manifest["proxy_port"]), "about:blank"])
@@ -629,13 +660,29 @@ def serve_fixtures(root, identity, ready):
     server.serve_forever()
 
 
+def run_native(pytest_args, chrome=None, fixtures=None):
+    """Prepare a fresh owned lab, run the native suite against it, and close the lab even when tests fail."""
+    output = SOURCE_ROOT / "artifacts" / "labs" / f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}.json"
+    prepare(output, chrome, fixtures or SOURCE_ROOT / "tests" / "fixtures")
+    try:
+        command = [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", "-m", "native",
+                   f"--lab-manifest={output}", *pytest_args]
+        return subprocess.run(command, cwd=SOURCE_ROOT, check=False).returncode
+    finally:
+        close(output)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     setup = commands.add_parser("prepare")
     setup.add_argument("--output", required=True)
-    setup.add_argument("--chrome", default=str(DEFAULT_CHROME))
+    setup.add_argument("--chrome", help="Chrome/Chromium executable; default: JEV_LAB_CHROME or a fixed install path")
     setup.add_argument("--fixtures")
+    native = commands.add_parser("run", help="prepare a lab, run the native tests, always close the lab")
+    native.add_argument("--chrome", help="Chrome/Chromium executable; default: JEV_LAB_CHROME or a fixed install path")
+    native.add_argument("--fixtures")
+    native.add_argument("pytest_args", nargs=argparse.REMAINDER, help="extra pytest arguments, after --")
     shutdown = commands.add_parser("close")
     shutdown.add_argument("--manifest", required=True)
     fixture = commands.add_parser("serve-fixtures")
@@ -652,6 +699,8 @@ def main():
     if args.command == "prepare":
         prepare(args.output, args.chrome, args.fixtures)
         print(f"Owned native lab ready: {Path(args.output).absolute()}")
+    elif args.command == "run":
+        raise SystemExit(run_native([arg for arg in args.pytest_args if arg != "--"], args.chrome, args.fixtures))
     elif args.command == "close":
         close(args.manifest)
         print("Owned native lab closed; retained disposable files for inspection")

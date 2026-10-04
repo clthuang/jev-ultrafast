@@ -165,7 +165,7 @@ node --check jev_ultrafast/snapshot.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples, recording scripts, and run reviews make paid API calls; the MCP server may start a review on its own, which `JEV_AUTO_REVIEW=0` turns off. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `uv run python scripts/validation_lab.py run` starts an owned headless Chrome on local fixtures, with every other network destination denied, runs the native tests against it, and closes it; it never touches your own browser, and works in Linux containers such as Claude Code on the web (`JEV_LAB_CHROME` picks the browser). `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples, recording scripts, and run reviews make paid API calls; the MCP server may start a review on its own, which `JEV_AUTO_REVIEW=0` turns off. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 
