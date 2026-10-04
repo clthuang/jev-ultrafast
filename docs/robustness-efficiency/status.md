@@ -16,7 +16,7 @@ changed, as §2 and §3 record.
 | Limits | LIMITS-1…2, GATE-LIMITS | Done, 2026-10-04 | Original machine: 15 named nodes / 45 variants, 422 focused tests; reviewer `browser_review` READY |
 | Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
 | Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
-| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Review fixes landed; reviewer confirmation pending | Cloud: 10 named nodes / 52 variants with `--native`, 714 offline and 31 native tests, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only (S1, nits), each fix pinned by the reviewer's mutants (§4.2) |
+| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Done, 2026-10-04 | Cloud, `0e48727`: 10 named nodes / 52 variants with `--native`, 714 offline tests, 31 browser-native tests plus the egress proof, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only, then READY (60 of 62 mutants caught, 2 equivalent) (§4.2) |
 | Readiness | READINESS-1…3, GATE-READINESS | In progress | §4.3 |
 | Release | RELEASE-1…3, GATE-RELEASE | Not started | — |
 
@@ -223,7 +223,13 @@ parity and bounds claim (56 mutants; 47 caught) and found tests missing, not cod
 The reviewer's seven surviving mutants of S1 and N1 (J07, J08, J09, J11, J38, P19, P20) are each caught by these
 tests; J26 and P09 are equivalent mutants. Commands at the fixing commit, on a clean copy of it:
 `scripts/plan_tests.py SNAPSHOT --native` (10 nodes / 52 variants), the full offline suite (714) and Ruff, all
-passing; the full native suite in a fresh lab (31) passes.
+passing; the full native suite in a fresh lab passes (31 browser-native tests plus the egress proof).
+
+**Re-review (`0e48727`): READY.** No blocker or should-fix finding remains. The reviewer re-ran every check above,
+re-measured every number this section quotes, and ran 62 mutants (the 56 of round 1 and six new ones aimed at the new
+tests' gaps: `target()` or `fresh()` bypassing `reference()`, an offered check by ID or node alone, the server loop
+overriding the stop code, TYPE_TEXT skipping its freshness read); 60 are caught and the two survivors, J26 and P09,
+are equivalent. Its one nit, this section's native count, is fixed here.
 
 ### 4.3 READINESS: page readiness on an owned event source
 
