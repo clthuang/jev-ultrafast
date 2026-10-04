@@ -503,6 +503,17 @@ class ReviewBusy(ValueError):
     """Another process holds the reviews' lock."""
 
 
+class RecoveryPending(OSError):
+    """A committed review's digest is not yet published. Its receipt is the record; new work waits for recovery."""
+
+    def __init__(self, committed_now):
+        self.committed_now = committed_now  # True: this call's own decisions passed the commit point
+        super().__init__("A committed review's digest is pending recovery")
+
+
+RECOVER_COMMAND = "uv run python scripts/review_runs.py recover"
+
+
 @contextlib.contextmanager
 def review_lock(wait=0):
     """The reviews' lock for one short state change. Manual commands answer BUSY at once; a paid review's own changes
@@ -592,7 +603,7 @@ def _prepare_batch(since=None):
 
 def prepare_batch(since=None):
     with review_lock():
-        recover_pending()
+        recover_or_stop()
         return _prepare_batch(since)
 
 
@@ -738,6 +749,14 @@ def ensure_digest(receipt):
     return path
 
 
+def recover_or_stop(*, committed_now=False):
+    """recover_pending(), turning a storage or record failure into RecoveryPending: never "nothing changed"."""
+    try:
+        return recover_pending()
+    except (OSError, review_records.RecordError) as error:
+        raise RecoveryPending(committed_now) from error
+
+
 def recover_pending():
     """Caller holds review lock. Every recovery reloads the latest notes envelope."""
     def recover(envelope):
@@ -755,7 +774,7 @@ def recover_pending():
 def _apply_batch(batch, reply, cost=None, attempt_id=None):
     """Caller holds review lock; notes+receipt is the sole decision commit point."""
     reply_hash = review_records.digest(reply)
-    recover_pending()
+    recover_or_stop()
     path = committed_path(batch["batch_id"])
     if path.exists():
         existing = review_records.read(path, "digest")
@@ -813,9 +832,13 @@ def _apply_batch(batch, reply, cost=None, attempt_id=None):
             site_notes.transaction(checked)
         except InvalidReply:
             return None, prepared["problems"]
-    # A failure here leaves the receipt as authoritative evidence. Never replay decisions.
-    recover_pending()
-    digest = review_records.read(path, "digest")
+    # Notes and receipt are committed: a failure from here on leaves the receipt as the record, pending recovery.
+    # Never replay decisions, and never report this reply as not applied.
+    recover_or_stop(committed_now=True)
+    try:
+        digest = review_records.read(path, "digest")
+    except review_records.RecordError as error:
+        raise RecoveryPending(True) from error
     for number, record in enumerate(digest["decisions"], 1):
         result = "applied" if record["applied"] else "refused"
         print(f"decision {number}, {record['action']}: {result}: {record['outcome']}")
@@ -1192,7 +1215,7 @@ def settle_ended(state, attempt, committed):
 
 def recover_attempts(state):
     """Under dispatch+review locks, settle abandoned work without redispatching it."""
-    recover_pending()
+    recover_or_stop()
     committed = {record.get("attempt_id"): record for _, record in review_records.committed(REVIEWS)}
     attempts = [review_records.read(path, "attempt") for path in sorted((REVIEWS / "attempts").glob("*.json"))]
     running = state.get("running")
@@ -1279,6 +1302,11 @@ def launch_attempt(attempt, batch):
         attempt.update(status="failed" if failure else "succeeded", error=failure)
     except Superseded:
         attempt.update(status="superseded", error="Batch dependencies changed while the reviewer was running")
+    except RecoveryPending as error:
+        # Committed decisions make this a success once recovery publishes the digest; until then it stays open.
+        attempt.update(status="returned" if error.committed_now else "uncertain",
+                       error="Committed; the digest is pending recovery" if error.committed_now else
+                       "An earlier committed review is pending recovery")
     except Exception as error:
         # Recovery below can establish success if the receipt publication already committed.
         attempt.update(status="uncertain", error=("the review crashed: " + clip(quote(str(error))) if quote else
@@ -1290,7 +1318,11 @@ def launch_attempt(attempt, batch):
             attempt["child"] = {"exited": True}
         save_attempt(attempt)
         state = read_state()
-        recover_pending()
+        try:
+            recover_or_stop()
+        except RecoveryPending:
+            print(f"review {attempt['attempt_id']}: committed review recovery is pending; run: {RECOVER_COMMAND}")
+            return 1
         path = committed_path(batch["batch_id"]) if batch else None
         if path and path.exists():
             committed = review_records.read(path, "digest")
@@ -1360,6 +1392,9 @@ def paid_command(kind, since=None):
     except DispatchBlocked as error:  # its message is built from this script's own records, never a reply
         print(f"Review stopped: {error}")
         return 0 if kind == "auto" else 1
+    except RecoveryPending:
+        print(f"Review stopped: a committed review's digest is pending recovery; run: {RECOVER_COMMAND}")
+        return 0 if kind == "auto" else 1
     except (OSError, ValueError):
         print("Review stopped: storage, exclusions, or reviewer ownership require recovery; "
               "no automatic retry was made.")
@@ -1387,6 +1422,14 @@ def apply_command(batch_id):
         if problems:
             print("Reply refused: " + "; ".join(problems))
             return 1
+    except RecoveryPending as error:
+        if error.committed_now:
+            print("The reply's decisions are committed, but their digest is not yet published; the receipt keeps "
+                  f"them. Run: {RECOVER_COMMAND}")
+        else:
+            print("An earlier review's decisions are committed but their digest is not yet published; nothing was "
+                  f"applied. Run: {RECOVER_COMMAND}")
+        return 1
     except store_io.PublicationUncertain:
         print("Publication is uncertain; recover the pending receipt before retrying. "
               "Decisions may already be committed.")
@@ -1396,6 +1439,21 @@ def apply_command(batch_id):
         print("Reply could not be applied; inspect batch freshness and storage, then recover before retrying.")
         return 1
     print(f"digest: {path}")
+    return 0
+
+
+def recover_command():
+    """Publish a committed review's digest from its retained receipt. It repeats no decision and calls no model."""
+    try:
+        with review_lock():
+            path = recover_pending()
+    except ReviewBusy:
+        print(BUSY)
+        return 1
+    except (OSError, review_records.RecordError):
+        print("Recovery failed; the receipt is retained. Inspect artifacts/reviews and the notes file, then retry.")
+        return 1
+    print(f"Recovered the committed digest: {path}" if path else "Nothing to recover.")
     return 0
 
 
@@ -1555,6 +1613,7 @@ def main(argv=None):
     ):
         commands.add_parser(name, help=help_text).add_argument("note_id")
     commands.add_parser("enable", help="restart automatic reviews after failures")
+    commands.add_parser("recover", help="publish a committed review's digest from its retained receipt")
     commands.add_parser("resolve", help="settle a review attempt whose reviewer cannot be verified, confirmed at a "
                                         "terminal").add_argument("attempt_id")
     commands.add_parser("auto", help="the automatic review the server starts: at most one a day")
@@ -1566,7 +1625,14 @@ def main(argv=None):
     if args.command == "queue":
         try:
             batch = prepare_batch(args.since)
-        except ValueError as error:  # the notes file cannot be read (P8)
+        except RecoveryPending:
+            print("A committed review's digest is not yet published; nothing was queued. "
+                  f"Run: {RECOVER_COMMAND}", file=sys.stderr)
+            return 1
+        except (store_io.PublicationUncertain, OSError):
+            print("The batch could not be saved; inspect artifacts/reviews, then queue again.", file=sys.stderr)
+            return 1
+        except ValueError as error:  # the notes file cannot be read (P8), or another command holds the lock
             print(error, file=sys.stderr)
             return 1
         text = batch["sent_text"]
@@ -1583,6 +1649,8 @@ def main(argv=None):
         return set_state_command(args.note_id, args.command)
     if args.command == "enable":
         return enable_command()
+    if args.command == "recover":
+        return recover_command()
     if args.command == "resolve":
         return resolve_command(args.attempt_id)
     if args.command == "auto":

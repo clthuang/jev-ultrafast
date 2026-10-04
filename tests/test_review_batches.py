@@ -910,6 +910,8 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
 
 
 import io  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 LEGACY_START = '2026-09-27T09:00:00'
 
@@ -976,3 +978,53 @@ def test_resolve_never_settles_a_verifiably_live_reviewer(fake_paid, monkeypatch
 def test_resolve_refuses_unknown_attempts(fake_paid, attempt_id, capsys):
     assert review_runs.main(['resolve', attempt_id]) == 1
     assert 'nothing resolved' in capsys.readouterr().out
+
+
+def pending_receipt():
+    envelope = json.loads(site_notes.NOTES_PATH.read_text())
+    return envelope['pending_review']
+
+
+@pytest.mark.parametrize('fault', ['digest write', 'conflicting digest', 'malformed digest'])
+def test_failure_after_commit_reports_recovery_pending_never_not_applied(fake_paid, monkeypatch, capsys, fault):
+    recovery()
+    batch = review_runs.prepare_batch()
+    reply = json.dumps({**EMPTY_REPLY, 'decisions': [add_decision()]})
+    path = review_runs.committed_path(batch['batch_id'])
+    real = review_runs.store_io.publish
+
+    def failing(target, value, **options):
+        if options.get('immutable') and Path(target) == path:
+            raise OSError('injected digest write failure')  # before publication: a plain OSError
+        return real(target, value, **options)
+
+    monkeypatch.setattr(review_runs.store_io, 'publish', failing)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(reply))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    out = capsys.readouterr().out
+    assert "decisions are committed" in out and 'could not be applied' not in out
+    receipt = pending_receipt()
+    assert receipt and receipt['batch_id'] == batch['batch_id'] and not path.exists()
+    added = [note for note in site_notes.load()[0] if note['runs'].get('recovered') == RUN_B]
+    assert len(added) == 1  # committed exactly once
+    if fault != 'digest write':
+        monkeypatch.setattr(review_runs.store_io, 'publish', real)
+        path.write_text('{"broken": ' if fault == 'malformed digest' else
+                        json.dumps({**receipt['digest'], 'summary': 'A different reply'}))
+    # Until recovery succeeds, neither another apply nor a paid review runs.
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(reply))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    assert 'nothing was applied' in capsys.readouterr().out
+    write_run(RUN_C)
+    assert review_runs.once_command(None) == 1 and fake_paid == []
+    assert 'pending recovery' in capsys.readouterr().out
+    if fault == 'digest write':
+        monkeypatch.setattr(review_runs.store_io, 'publish', real)
+        assert review_runs.main(['recover']) == 0
+        assert pending_receipt() is None and review_records.read(path, 'digest') == receipt['digest']
+        monkeypatch.setattr(sys, 'stdin', io.StringIO(reply))
+        assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 0  # same reply: its recorded result
+        assert len([note for note in site_notes.load()[0] if note['runs'].get('recovered') == RUN_B]) == 1
+    else:
+        assert review_runs.main(['recover']) == 1
+        assert 'receipt is retained' in capsys.readouterr().out and pending_receipt() == receipt
