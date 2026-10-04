@@ -653,6 +653,88 @@ def test_live_or_unknown_child_blocks_new_dispatch(fake_paid, monkeypatch, owner
     assert review_runs.once_command(None) == 1 and fake_paid == []
 
 
+def hold_review_lock(seconds):
+    """Hold the reviews' lock from another thread, as a manual queue, apply or enable does; returns once it is held."""
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        lock = review_runs.take_lock()
+        assert lock is not None
+        with lock:
+            held.set()
+            release.wait(seconds)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert held.wait(5)
+    return release, thread
+
+
+@pytest.mark.parametrize('phase', ['before_spawn', 'on_spawn', 'on_exit', 'returned'])
+def test_manual_lock_holder_delays_but_never_fails_a_paid_review(fake_paid, monkeypatch, phase):
+    write_run()
+    fake, holders = review_runs.launch, []
+
+    def contended(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
+        def at(name, callback):
+            def wrapped(*args):
+                if name == phase:
+                    holders.append(hold_review_lock(0.3))
+                return callback(*args)
+            return wrapped
+        result = fake(text, budget, quote, before_spawn=at('before_spawn', before_spawn),
+                      on_spawn=at('on_spawn', on_spawn), on_exit=at('on_exit', on_exit))
+        if phase == 'returned':
+            holders.append(hold_review_lock(0.3))
+        return result
+
+    monkeypatch.setattr(review_runs, 'launch', contended)
+    assert review_runs.once_command(None) == 0
+    for _, thread in holders:
+        thread.join(5)
+    [attempt] = attempts()
+    assert attempt['status'] == 'succeeded' and attempt['cost'] == 0.0123 and attempt['child']['exited'] is True
+    assert len(fake_paid) == 1 and len(review_records.committed(review_runs.REVIEWS)) == 1
+    state = review_runs.read_state()
+    assert state.get('failures', 0) == 0 and state['accounted_attempt_ids'] == [attempt['attempt_id']]
+    write_run(RUN_B)
+    assert review_runs.once_command(None) == 0 and len(fake_paid) == 2  # nothing blocks the next dispatch
+
+
+def test_paid_review_waits_for_the_review_lock_only_up_to_its_bound(fake_paid, monkeypatch, capsys):
+    """Past SHORT_LOCK_SECONDS a paid review reports BUSY. Its attempt file still holds the reaped child and the known
+    cost, so the next dispatch settles it once instead of being blocked or losing the cost."""
+    write_run()
+    monkeypatch.setattr(review_runs, 'SHORT_LOCK_SECONDS', 0.2)
+    release, thread = hold_review_lock(10)
+    assert review_runs.once_command(None) == 1  # BUSY before any claim: nothing launched or recorded
+    assert review_runs.BUSY in capsys.readouterr().out and fake_paid == [] and attempts() == []
+    release.set()
+    thread.join(5)
+    fake, holders = review_runs.launch, []
+
+    def returns_into_contention(*args, **kwargs):
+        result = fake(*args, **kwargs)
+        holders.append(hold_review_lock(10))
+        return result
+
+    monkeypatch.setattr(review_runs, 'launch', returns_into_contention)
+    assert review_runs.once_command(None) == 1
+    assert review_runs.BUSY in capsys.readouterr().out
+    [returned] = attempts()
+    assert returned['status'] == 'returned' and returned['cost'] == 0.0123 and returned['child']['exited'] is True
+    assert review_records.committed(review_runs.REVIEWS) == []
+    release, thread = holders[0]
+    release.set()
+    thread.join(5)
+    monkeypatch.setattr(review_runs, 'launch', fake)
+    assert review_runs.once_command(None) == 0 and len(fake_paid) == 2
+    settled = next(item for item in attempts() if item['attempt_id'] == returned['attempt_id'])
+    assert settled['status'] == 'abandoned' and settled['cost'] == 0.0123  # known cost kept, never invented
+    state = review_runs.read_state()
+    assert returned['attempt_id'] in state['accounted_attempt_ids'] and len(state['accounted_attempt_ids']) == 2
+
+
 def test_note_cap_selects_oldest_despite_store_order():
     notes = []
     for number in reversed(range(7)):

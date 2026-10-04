@@ -17,7 +17,8 @@ ID = re.compile(r'[0-9a-f]{32}')
 HASH = re.compile(r'[0-9a-f]{64}')
 RUN_ID = re.compile(r'\d{8}-\d{6}-[0-9a-f]{4}')
 LEGACY_DIGEST = re.compile(r'\d{8}-\d{6}')
-ATTEMPT_STATES = {'claimed', 'spawning', 'running', 'succeeded', 'failed', 'superseded', 'uncertain', 'abandoned'}
+ATTEMPT_STATES = {'claimed', 'spawning', 'running', 'returned', 'succeeded', 'failed', 'superseded',
+                  'uncertain', 'abandoned'}
 
 
 class RecordError(ValueError):

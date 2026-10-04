@@ -57,6 +57,9 @@ STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 BUSY = "Another review is running; try again when it ends."
 # How long a review that sent its result, or was killed, may take to exit before its group gets SIGKILL.
 EXIT_SECONDS = 10
+# How long a paid review's short state changes wait for the reviews' lock that a manual queue, apply or enable holds.
+# Manual commands never wait on a model, so this bound is never reached by ordinary use; past it the change is BUSY.
+SHORT_LOCK_SECONDS = 30
 
 # A summary's limits: a label or title as the server's results clip them, and room for any recorded goal or evidence.
 LABEL_CHARACTERS = 80
@@ -496,11 +499,17 @@ class DecisionRefused(ValueError):
     """A semantic decision refusal can coexist with valid neighboring decisions."""
 
 
+class ReviewBusy(ValueError):
+    """Another process holds the reviews' lock."""
+
+
 @contextlib.contextmanager
-def review_lock():
-    lock = take_lock()
+def review_lock(wait=0):
+    """The reviews' lock for one short state change. Manual commands answer BUSY at once; a paid review's own changes
+    pass wait=SHORT_LOCK_SECONDS so a concurrent manual command delays them instead of failing them."""
+    lock = take_lock(wait)
     if lock is None:
-        raise ValueError(BUSY)
+        raise ReviewBusy(BUSY)
     with lock:
         yield
 
@@ -838,16 +847,21 @@ def write_digest(started, digest):
     return path
 
 
-def take_lock():
-    """The reviews' lock, held until it is closed or the process exits; None while another review holds it."""
+def take_lock(wait=0):
+    """The reviews' lock, held until it is closed or the process exits; None while another process holds it for longer
+    than wait seconds."""
     REVIEWS.mkdir(parents=True, exist_ok=True)
     lock = open(LOCK_PATH, "a")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock.close()
-        return None
-    return lock
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                lock.close()
+                return None
+            time.sleep(0.05)
 
 
 def count_failure(state):
@@ -981,6 +995,9 @@ def launch(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit
                 except subprocess.TimeoutExpired:
                     kill_group(process, signal.SIGKILL)
                     wait_for_child(process, EXIT_SECONDS)
+                if on_exit:
+                    with contextlib.suppress(Exception):  # the original failure is the one to report
+                        on_exit(process)
                 raise
         expired = Event()
         # A session that ignores SIGTERM still ends, EXIT_SECONDS later, so it never holds the lock past its limit.
@@ -1204,9 +1221,10 @@ def launch_attempt(attempt, batch):
     spawn_attempted = False
 
     def transition(**changes):
-        with review_lock():
-            attempt.update(changes)
-            save_attempt(attempt)
+        # Attempt files are written only by the dispatch lock's holder (claim, these transitions, settlement and
+        # recovery), so a transition needs no review lock and a manual command can never fail it.
+        attempt.update(changes)
+        save_attempt(attempt)
 
     def spawning():
         nonlocal spawn_attempted
@@ -1218,11 +1236,12 @@ def launch_attempt(attempt, batch):
                                              "exited": False})
 
     def exited(process):
-        transition(child={**(attempt.get("child") or {}), "exited": group_alive(process.pid) is False})
+        child = attempt.get("child") or {"pid": process.pid, "identity": process_identity(process.pid)}
+        transition(child={**child, "exited": group_alive(process.pid) is False})
 
     try:
         if batch:
-            with review_lock():
+            with review_lock(wait=SHORT_LOCK_SECONDS):
                 with run_store.metadata_lock(RUNS, create=True):
                     queue = site_notes.transaction(lambda envelope: verify_batch(
                         batch, load_runs(), envelope["notes"], site_notes.read_exclude(site_notes.EXCLUDE_PATH)),
@@ -1232,12 +1251,13 @@ def launch_attempt(attempt, batch):
                                       before_spawn=spawning,
                                       on_spawn=spawned, on_exit=exited)
         cost = (result or {}).get("total_cost_usd")
-        attempt["cost"] = cost if review_records.valid_cost(cost) else None
+        # A paid reply's known cost is kept before it is applied, so no later failure or crash loses it.
+        transition(status="returned", cost=cost if review_records.valid_cost(cost) else None)
         failure = failure or result_failure(result or {}, quote)
         if failure is None:
             reply = reply_of(result)
             if batch:
-                with review_lock():
+                with review_lock(wait=SHORT_LOCK_SECONDS):
                     _, problems = _apply_batch(batch, reply, attempt["cost"], attempt["attempt_id"])
             else:
                 problems = schema_errors(reply, REVIEW_SCHEMA)
@@ -1249,7 +1269,7 @@ def launch_attempt(attempt, batch):
         # Recovery below can establish success if the receipt publication already committed.
         attempt.update(status="uncertain", error=("the review crashed: " + clip(quote(str(error))) if quote else
                                                    "The review stopped before its privacy context was verified"))
-    with review_lock():
+    with review_lock(wait=SHORT_LOCK_SECONDS):
         attempt["finished_at"] = datetime.now().isoformat()
         if attempt.get("child") is None and (not spawn_attempted or attempt["status"] != "uncertain"):
             # Missing binary / failed Popen completed synchronously; no child exists.
@@ -1298,7 +1318,7 @@ def paid_command(kind, since=None):
         return 0 if kind == "auto" else 1
     try:
         with lock:
-            with review_lock():
+            with review_lock(wait=SHORT_LOCK_SECONDS):
                 # Unreadable exclusions cannot change state, even through abandoned settlement.
                 site_notes.read_exclude(site_notes.EXCLUDE_PATH)
                 state = read_state()
@@ -1320,6 +1340,9 @@ def paid_command(kind, since=None):
                         return 0
                 attempt = claim_attempt(state, kind, batch, now)
             return launch_attempt(attempt, batch)
+    except ReviewBusy:
+        print(BUSY)
+        return 0 if kind == "auto" else 1
     except (OSError, ValueError):
         print("Review stopped: storage, exclusions, or reviewer ownership require recovery; "
               "no automatic retry was made.")

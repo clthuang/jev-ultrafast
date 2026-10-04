@@ -379,7 +379,7 @@ def review_lines(reviews, kept, exclude, left_out):
         print(f"skipped {path}: invalid review record", file=sys.stderr)
     for path, digest in records:
         status = digest["status"]
-        if status in {"claimed", "spawning", "running"}:
+        if status in {"claimed", "spawning", "running", "returned"}:
             status = "uncertain" if digest.get("deadline", float("inf")) <= time.time() else "running"
         failed = status in {"failed", "uncertain", "abandoned"}
         if digest["cost_key"] not in cost_keys:
