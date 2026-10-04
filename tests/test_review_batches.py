@@ -52,6 +52,8 @@ import pytest  # noqa: E402
 from jev_ultrafast import review_records  # noqa: E402
 from scripts import report_runs  # noqa: E402
 
+REAL_LAUNCH = review_runs.launch
+
 RUN_A = '20261003-100000-0001'
 RUN_B = '20261003-100100-0002'
 RUN_C = '20261003-100200-0003'
@@ -892,19 +894,30 @@ def test_digest_corruption_never_acknowledges_or_replays(mutation):
         apply_batch(batch)
 
 
-def test_auto_cutoff_and_exclusions_survive_migration():
+def test_auto_cutoff_and_exclusions_survive_migration(fake_paid):
     from scripts.migrate_review_storage import migrate_storage
 
-    write_run('20260926-100000-0001')
-    write_run(RUN_A)
-    write_run(RUN_B, page={'url': 'https://private.example/', 'title': 'Private'})
+    before_build = '20260926-100000-0001'  # before AUTO_FROM: automatic reviews never send it
+    write_run(before_build)
+    private = '20261003-090000-0001'
+    write_run(private, page={'url': 'https://private.example/', 'title': 'Private'})
+    eligible = [f'20261003-100000-{number:04x}' for number in range(review_runs.REVIEW_QUEUE)]
+    for run_id in eligible:
+        write_run(run_id)
+    # A legacy store: list-format notes and the earlier state file, with one failure counted.
     site_notes.NOTES_PATH.write_text(json.dumps(site_notes.SEEDS))
     site_notes.EXCLUDE_PATH.write_text('private.example\n')
-    cutoff = review_runs.AUTO_FROM
+    site_notes.write_review_state({'last_start': '2026-09-29T09:00:00', 'next_due': 0, 'running': None,
+                                   'failures': 1, 'off': False})
     migrate_storage(site_notes.NOTES_PATH.parent)
-    batch = review_runs.prepare_batch(review_runs.day(cutoff))
-    assert list(batch['runs']) == [RUN_A]
-    assert review_runs.AUTO_FROM == cutoff
+    assert site_notes.read_envelope(site_notes.NOTES_PATH)['schema_version'] == 2
+    review_runs.auto_command()
+    [(sent, budget)] = fake_paid
+    assert budget == review_runs.REVIEW_BUDGET_USD
+    assert all(f'run {run_id} · queued' in sent for run_id in eligible)
+    assert before_build not in sent and private not in sent and 'private.example' not in sent
+    state = review_runs.read_state()
+    assert state['failures'] == 0 and state['next_due'] > time.time()  # success clears the carried count
     assert site_notes.EXCLUDE_PATH.read_text() == 'private.example\n'
 
 
@@ -913,7 +926,17 @@ def test_export_preserves_new_notes_outcomes_receipts_and_ack_history(tmp_path, 
     from scripts.migrate_review_storage import export_storage, migrate_storage
 
     recovery()
-    site_notes.NOTES_PATH.write_text(json.dumps(site_notes.SEEDS))
+    # A legacy store: list notes with a retired note, a timestamp-named digest and the earlier state file.
+    retired = {**deepcopy(site_notes.SEEDS[0]), 'id': 'old.example-1', 'site': 'old.example', 'approved': None,
+               'retired': '2026-09-28'}
+    site_notes.NOTES_PATH.write_text(json.dumps([*site_notes.SEEDS, retired]))
+    legacy_digest = review_runs.REVIEWS / '20260927-100000.json'
+    legacy_digest.parent.mkdir(parents=True, exist_ok=True)
+    legacy_digest.write_text(json.dumps({'queue': {'runs': [RUN_A]}, 'decisions': [], 'flags': [], 'proposals': [],
+                                         'summary': 'Old review.', 'cost': 0.07}))
+    site_notes.write_review_state({'last_start': '2026-09-28T09:00:00', 'next_due': 0, 'running': None,
+                                   'failures': 2, 'off': False})
+    legacy_state = site_notes.REVIEW_STATE.read_bytes()
     migrate_storage(site_notes.NOTES_PATH.parent)
     first = review_runs.prepare_batch()
     apply_batch(first)
@@ -937,54 +960,131 @@ def test_export_preserves_new_notes_outcomes_receipts_and_ack_history(tmp_path, 
     exported = tmp_path / 'recovered-export'
     manifest = export_storage('artifacts', exported)
     for name, expected in manifest.items():
-        source = __import__('pathlib').Path('artifacts') / name
+        source = Path('artifacts') / name
         assert source.read_bytes() == (exported / name).read_bytes()
+        assert __import__('hashlib').sha256((exported / name).read_bytes()).hexdigest() == expected
     assert len(review_records.committed(exported / 'reviews')) == 2
-    assert any(note['site'] == 'new.example' for note in site_notes.load(exported / 'site-notes.json')[0])
+    notes = {note['id']: note for note in site_notes.load(exported / 'site-notes.json')[0]}
+    assert any(note['site'] == 'new.example' for note in notes.values())
+    assert notes['old.example-1']['retired'] == '2026-09-28'  # migration kept the retirement
     assert len(json.loads((exported / 'runs' / f'{RUN_B}.json').read_text())['outcome']) == 2
+    assert (exported / 'reviews' / legacy_digest.name).read_bytes() == legacy_digest.read_bytes()
+    assert (exported / 'reviews' / 'state.json').read_bytes() == site_notes.REVIEW_STATE.read_bytes()
+    assert json.loads(legacy_state)['failures'] == 2 == json.loads(site_notes.REVIEW_STATE.read_text())['failures']
+    acknowledged = review_records.acknowledged(exported / 'reviews')
+    assert set(acknowledged['runs']) == set(first['runs']) | set(batch['runs'])  # every exact version kept
+
+
+PRIVATE_PREDECESSOR, FIRST_TRY, RECOVERED, UNRELATED = (
+    '20261003-090000-0001', '20261003-090100-0002', '20261003-090200-0003', '20261003-100000-0004')
 
 
 def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fake_paid):
-    from scripts import report_runs
+    """Canaries typed by a selected run, a deferred run and an excluded predecessor never reach any output or file:
+    the queue and apply CLI, refusals beside a valid decision, a receipt, recovery, every paid failure message
+    (provider error, start failure, did not start, crash), attempts, state and the report."""
+    from scripts.migrate_review_storage import migrate_storage
 
     selected, deferred, excluded = 'Selectedcanary', 'Deferredcanary', 'Excludedcanary'
-    write_run(RUN_A, goal=f'{selected} {deferred} {excluded}', history=[{'text': selected}])
-    write_run(RUN_B, history=[{'text': deferred}])
-    write_run(RUN_C, previous_run=RUN_A, history=[{'text': excluded}])
-    site_notes.EXCLUDE_PATH.write_text(RUN_C)
-    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 1)
-    batch = review_runs.prepare_batch()
-    # Schema refusal cannot quote dynamic keys; semantic refusal keeps trusted wording.
-    _, errors = apply_batch(batch, {**EMPTY_REPLY, deferred: 'unexpected'})
-    print('; '.join(errors))
-    reply = {**EMPTY_REPLY, 'summary': selected + ' ' + deferred + ' ' + excluded,
-             'decisions': [add_decision(detail=selected)]}
-    original = review_runs.ensure_digest
-    monkeypatch.setattr(review_runs, 'ensure_digest', lambda receipt: (_ for _ in ()).throw(OSError('fixture')))
-    with pytest.raises(OSError):
-        apply_batch(batch, reply)
-    receipt_bytes = site_notes.NOTES_PATH.read_text()
-    assert 'its detail holds a value from a task' in receipt_bytes
-    monkeypatch.setattr(review_runs, 'ensure_digest', original)
-    with review_runs.review_lock():
-        review_runs.recover_pending()
-    # Change a contributor to requeue, retaining all canary values in the verified context.
-    path = review_runs.RUNS / f'{RUN_A}.json'
-    value = json.loads(path.read_text())
-    value['outcome'][0]['at'] = 'later'
-    path.write_text(json.dumps(value))
+    canaries = (selected, deferred, excluded)
+    site_notes.NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    site_notes.NOTES_PATH.write_text(json.dumps(site_notes.SEEDS))  # a legacy store, migrated first
+    migrate_storage(site_notes.NOTES_PATH.parent)
+    write_run(PRIVATE_PREDECESSOR, goal=f'{excluded} search', history=[{'text': excluded}])
+    write_run(FIRST_TRY, previous_run=PRIVATE_PREDECESSOR, goal=f'{selected} {deferred} {excluded}',
+              history=[{'text': selected}])
+    write_run(RECOVERED, previous_run=FIRST_TRY, goal=f'{selected} again', history=[{'text': selected}],
+              result={'status': 'done', 'notes': []},
+              outcome=[{'passed': True, 'by': 'user', 'evidence': 'Verified', 'at': '2026-10-03T11:00:00'}])
+    write_run(UNRELATED, history=[{'text': deferred}])
+    site_notes.EXCLUDE_PATH.write_text(PRIVATE_PREDECESSOR)
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 2)
+    outputs = []
+
+    def drain():
+        captured = capsys.readouterr()
+        outputs.append(captured.out + captured.err)
+        return outputs[-1]
+
+    assert review_runs.main(['queue']) == 0
+    batch = review_runs.load_batch(batch_id_of(drain()))
+    assert set(batch['runs']) == {FIRST_TRY, RECOVERED}
+    assert {'kind': 'runs', 'id': UNRELATED, 'reason': 'item_cap'} in batch['deferred']
+    # A schema refusal whose key is a canary is refused without quoting it.
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({**EMPTY_REPLY, deferred: 'unexpected'})))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    assert 'unknown key <value>' in drain()
+    # A semantic refusal beside a valid decision; the digest then fails once, so the receipt keeps both.
+    reply = {**EMPTY_REPLY, 'summary': ' '.join(canaries), 'decisions': [
+        add_decision(RECOVERED, detail=f'Type {selected} first.'), add_decision(RECOVERED)]}
+    real_publish, fired = review_runs.store_io.publish, []
+
+    def fail_digest_once(target, value, **options):
+        if options.get('immutable') and Path(target).parent == review_runs.REVIEWS and not fired:
+            fired.append(target)
+            raise OSError(f'{excluded} disk full')
+        return real_publish(target, value, **options)
+
+    monkeypatch.setattr(review_runs.store_io, 'publish', fail_digest_once)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(reply)))
+    assert review_runs.main(['apply', '--batch', batch['batch_id']]) == 1
+    assert 'decisions are committed' in drain()
+    receipt_text = site_notes.NOTES_PATH.read_text()
+    assert 'its detail holds a value from a task' in receipt_text
+    assert review_runs.main(['recover']) == 0
+    drain()
+    digest = review_records.read(review_runs.committed_path(batch['batch_id']), 'digest')
+    assert [decision['applied'] for decision in digest['decisions']] == [False, True]
+    # Each paid failure path, its message built from canaries; a correction requeues the first try each time.
     fake = review_runs.launch
-    def provider_error(*args, **kwargs):
-        init, result, _ = fake(*args, **kwargs)
-        result.update(subtype=selected, result=deferred + ' ' + excluded)
+
+    def provider_error(text, budget, quote=str, **callbacks):
+        init, result, _ = fake(text, budget, quote, **callbacks)
+        result.update(subtype=selected, result=f'{deferred} {excluded}')
         return init, result, None
-    monkeypatch.setattr(review_runs, 'launch', provider_error)
+
+    def start_failure(text, budget, quote=str, *, before_spawn=None, on_spawn=None, on_exit=None):
+        fake_paid.append((text, budget))
+        process = SimpleNamespace(pid=12345)
+        before_spawn()
+        on_spawn(process)
+        on_exit(process)
+        init = {'type': 'system', 'subtype': 'init', 'tools': [selected], 'mcp_servers': [deferred]}
+        return init, None, review_runs.start_failure(init, quote)
+
+    def crash(*args, **kwargs):
+        raise RuntimeError(f'{excluded} crashed the review')
+
+    paths = [('provider', provider_error), ('start', start_failure), ('crash', crash)]
+    for number, (name, launcher) in enumerate(paths, 1):
+        path = review_runs.RUNS / f'{FIRST_TRY}.json'
+        value = json.loads(path.read_text())
+        value['outcome'][0]['at'] = f'2026-10-03T12:00:0{number}'
+        path.write_text(json.dumps(value))
+        monkeypatch.setattr(review_runs, 'launch', launcher)
+        assert review_runs.once_command(None) == 1
+        drain()
+    # The real launch, whose Popen fails with a message naming a canary.
+    monkeypatch.setattr(review_runs, 'launch', REAL_LAUNCH)
+    monkeypatch.setattr(review_runs.shutil, 'which', lambda name: '/usr/local/bin/claude')
+    monkeypatch.setattr(review_runs.subprocess, 'Popen', lambda *args, **kwargs: (_ for _ in ()).throw(
+        OSError(f'{deferred} is not executable')))
+    path = review_runs.RUNS / f'{FIRST_TRY}.json'
+    value = json.loads(path.read_text())
+    value['outcome'][0]['at'] = '2026-10-03T12:00:09'
+    path.write_text(json.dumps(value))
     assert review_runs.once_command(None) == 1
-    report_runs.review_lines(review_runs.REVIEWS, site_notes.load()[0], {RUN_C}, {RUN_C})
-    published = [site_notes.NOTES_PATH, *review_runs.REVIEWS.rglob('*.json')]
-    all_output = receipt_bytes + capsys.readouterr().out + ''.join(path.read_text() for path in published)
-    assert not any(canary in all_output for canary in (selected, deferred, excluded))
-    assert 'the review ended with <value>: <value> <value>' in all_output
+    drain()
+    lines = report_runs.review_lines(review_runs.REVIEWS, site_notes.load()[0], {PRIVATE_PREDECESSOR},
+                                     {PRIVATE_PREDECESSOR})
+    drain()
+    published = [site_notes.NOTES_PATH, site_notes.REVIEW_STATE, *review_runs.REVIEWS.rglob('*.json')]
+    everything = receipt_text + ''.join(outputs) + '\n'.join(lines) + ''.join(
+        path.read_text() for path in published if path.exists())
+    assert not any(canary.lower() in everything.lower() for canary in canaries)
+    for wording in ('the review ended with <value>: <value> <value>', 'the session has tools beyond StructuredOutput',
+                    'the review crashed: <value>', 'claude did not start: <value>', 'its detail holds a value from'):
+        assert wording in everything, wording
 
 
 import io  # noqa: E402
