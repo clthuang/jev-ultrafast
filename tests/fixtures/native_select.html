@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Exact native option fixture</title>
+<style>body{margin:25px}select,input{display:block;width:230px;margin:8px}fieldset{width:300px}</style>
+<form>
+  <p id="context">Choose a category</p>
+  <fieldset id="fieldset">
+    <select id="category" aria-label="Category">
+      <option id="placeholder" value="">Choose</option>
+      <option id="disabled-alias" value="same" disabled>Same</option>
+      <option id="first" value="same">Same</option>
+      <optgroup id="group" label="Additional">
+        <option id="second" value="same" label="Same">Second internal text</option>
+        <option id="other-option" value="other">Other</option>
+      </optgroup>
+    </select>
+  </fieldset>
+  <input id="field" aria-label="Query" value="old">
+  <select id="owner" aria-label="Another dropdown"><option value="">Other owner</option></select>
+  <select id="multiple" aria-label="Interests" multiple>
+    <option id="multi-first" role="option" value="one" selected>First interest</option>
+    <option id="multi-second" role="option" value="two" selected>Second interest</option>
+    <option role="option" value="three">Third interest</option>
+  </select>
+</form>
+<script>
+window.events=[];
+for(const type of ['input','change']) document.addEventListener(type,event=>{
+  const select=event.target;
+  window.events.push({event:type,select:select.id,index:select.selectedIndex,key:select.selectedOptions?.[0]?.id});
+});
+</script>

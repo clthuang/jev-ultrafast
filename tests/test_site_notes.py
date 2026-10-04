@@ -522,7 +522,7 @@ def test_a_missing_file_starts_with_the_approved_seeds():
     assert not Path("artifacts").exists()  # create=False writes nothing
     notes, error = site_notes.load()
     assert error is None and notes == site_notes.SEEDS
-    assert json.loads(site_notes.NOTES_PATH.read_text()) == site_notes.SEEDS
+    assert json.loads(site_notes.NOTES_PATH.read_text())["notes"] == site_notes.SEEDS
     notes[0]["shown"] = 1
     assert site_notes.SEEDS[0]["shown"] == 0  # the file started from a copy
     assert site_notes.load(create=False) == (site_notes.SEEDS, None)
@@ -544,7 +544,7 @@ def test_a_writer_waits_for_the_lock():
         assert signalled.wait(5)
         time.sleep(0.5)
         assert site_notes.NOTES_PATH.read_text() == before
-        write_notes(json.loads(before)[:3])  # another writer's change, made while holding the lock
+        write_notes(json.loads(before)["notes"][:3])  # another writer's change, made while holding the lock
     thread.join(5)  # closing the lock file released the lock
     assert not thread.is_alive()
     # The waiting writer read the file after the lock, so it kept the other change.
@@ -650,9 +650,9 @@ def test_an_unreadable_notes_file_shows_no_notes_and_is_never_overwritten():
         assert site_notes.NOTES_PATH.read_text() == broken
     # Nor does any writer leave a note of the wrong type, which would stop every later read.
     write_notes(site_notes.SEEDS)
-    with pytest.raises(ValueError, match="the types a note needs"):
+    with pytest.raises(ValueError, match="wrong type"):
         site_notes.add_note(lesson(detail=42))
-    with pytest.raises(ValueError, match="the types a note needs"):
+    with pytest.raises(ValueError, match="wrong type"):
         site_notes.update(lambda notes: notes[0].update(approved=True))  # a hand approval, as a writer might set it
     assert site_notes.load() == (site_notes.SEEDS, None)
 

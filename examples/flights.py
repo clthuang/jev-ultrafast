@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from jev_ultrafast import Agent
 
 URL = "https://www.google.com/travel/flights?hl=en"
+FLIGHT_OPERATIONS = ["CLICK", "TYPE_TEXT", "SELECT", "SCROLL_UP", "SCROLL_DOWN", "WAIT"]
 
 
 def goal_for(departure):
@@ -59,7 +60,7 @@ def main():
     args = parser.parse_args()
     folder = Path(args.output)
     folder.mkdir(parents=True, exist_ok=True)
-    agent = Agent(URL, GOALS)
+    agent = Agent(URL, GOALS, allowed_operations=FLIGHT_OPERATIONS)
     try:
         for state in agent.run():
             last = state["history"][-1] if state["history"] else {}

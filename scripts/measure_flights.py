@@ -20,7 +20,7 @@ from jev_ultrafast import Agent  # noqa: E402
 from jev_ultrafast import browser as browser_module  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from examples.flights import GOALS, URL, verify  # noqa: E402
+from examples.flights import FLIGHT_OPERATIONS, GOALS, URL, verify  # noqa: E402
 
 folder = Path(args.output)
 folder.mkdir(parents=True, exist_ok=False)
@@ -40,8 +40,9 @@ def timed(method, *positional, **kwargs):
 
 
 browser_module.cdp = timed
-# Older sources (--source) predate trace_path, so pass it only when tracing.
-agent = Agent(URL, GOALS, **({"trace_path": folder / "run.json"} if args.trace else {}))
+# The selected source must implement explicit policies; historical results retain their original provenance.
+agent = Agent(URL, GOALS, allowed_operations=FLIGHT_OPERATIONS,
+              **({"trace_path": folder / "run.json"} if args.trace else {}))
 # Setup is excluded in both arms, as in the original demo.
 calls.clear()
 error = None

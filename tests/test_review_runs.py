@@ -46,6 +46,9 @@ def launches(tmp_path, monkeypatch):
     for name in ("JEV_LEARNING", "JEV_AUTO_REVIEW"):
         monkeypatch.delenv(name, raising=False)  # the shell's settings stay out
     record = SimpleNamespace(calls=[], kills=[], workdirs=[])
+    monkeypatch.setattr(review_runs, "process_identity", lambda pid: {
+        "state": "present", "pid": pid, "birth": "100:123", "uid": review_runs.os.getuid(), "pgid": pid})
+    monkeypatch.setattr(review_runs, "group_alive", lambda pid: False)
 
     def no_launch(argv, **options):
         raise AssertionError("a test started claude without a fake Popen")
@@ -138,10 +141,12 @@ def recent_runs(number):
 
 def assert_failed_digest(launches, failure, run_ids):
     """A failed review's digest records the reason, the queue and the exact text sent; its runs stay queued."""
-    [digest] = digests()
-    assert sorted(digest) == ["cost", "failure", "queue", "sent"]
-    assert (digest["failure"], digest["sent"], digest["cost"]) == (failure, launches.calls[0]["stdin"], None)
-    assert digest["queue"]["runs"] == list(review_runs.build_queue()["runs"]) == run_ids
+    [attempt] = [json.loads(path.read_text()) for path in (review_runs.REVIEWS / "attempts").glob("*.json")]
+    assert attempt["status"] == "failed"
+    assert (attempt["error"], attempt["sent_text"], attempt["cost"]) == (failure, launches.calls[0]["stdin"], None)
+    assert [item["id"] for item in attempt["input_items"] if item["kind"] == "runs"] == run_ids
+    assert list(review_runs.build_queue()["runs"]) == run_ids
+    assert digests() == []
 
 
 def seeds_dated_today():
@@ -169,7 +174,7 @@ def stored(note_id):
 
 
 def digests():
-    return [json.loads(path.read_text()) for path in sorted(review_runs.REVIEWS.glob("2*.json"))]
+    return [record for _, record in review_runs.review_records.committed(review_runs.REVIEWS)]
 
 
 def retire(note_id, *runs):
@@ -203,7 +208,7 @@ def test_summaries_hold_no_typed_values_page_text_or_query_values(capsys):
         "and the message read see "
         "https://example.com/help?sid=SIDSECRET42, then visit https://docs.example.net/x?t=GUARDSECRET42; the website "
         "field shows https://lee.me. It kept it (https://lee.me); note developer.mozilla.org-1 was shown on "
-        f"example.com, unlike run 20260926-090000-0001 or run {RECOVERED}; ref 12345678-123456-abcd; as Jane Doe."
+        f"example.com, unlike run 20260926-090000-0001 or run <value>-<value>-<value>; ref 12345678-123456-abcd; as Jane Doe."
     )
     # Typed values in a path: plainly, joined to a word by an underscore, and names joined by "+", "-" or "_".
     back_on = (f"back on https://example.com:443/u/jane_doe/by/Bobby+Lee/people/bo-lee/wiki/Bo_Lee/{CANARY}_Tours/"
@@ -260,7 +265,7 @@ def test_summaries_hold_no_typed_values_page_text_or_query_values(capsys):
         "<value> on flight UA<value>; it opened https://user<value>.<value>.net:<value>/x and <value>://open, searched "
         "<value> and <value>.<value>, and the message read <value>/help?sid= then <value>://docs.<value>.net/x?t= the "
         "website field shows <value>. It kept it (<value>); note developer.mozilla.org-1 was shown on example.com, "
-        f"unlike run <value>-<value>-<value> or run {RECOVERED}; ref <value>-abcd; as <value>."
+        f"unlike run <value>-<value>-<value> or run <value>-<value>-<value>; ref <value>-abcd; as <value>."
     ) in out
     assert VISIBLE_TEXT not in out and REQUEST_TEXT not in out
     # URLs lose their query values before any value is matched, so the quoted search hides none of the final URL's.
@@ -322,12 +327,12 @@ def test_summaries_skip_excluded_and_reviewed_runs(capsys):
     site_notes.update(change)
     assert review_runs.main(["queue"]) == 0
     out = capsys.readouterr().out
-    assert re.findall(r"^run (\S+)", out, re.MULTILINE) == [waiting]
-    assert excluded not in out and "private.example.org" not in out and reviewed not in out
+    assert re.findall(r"^run (\S+)", out, re.MULTILINE) == [reviewed, waiting]
+    assert excluded not in out and "private.example.org" not in out and reviewed in out
     assert "stop notes: opened a new tab: https://<value>/w" in out
     assert "goal: Type <value> again." in out.splitlines()
     assert "failed by claude: It went to <value>, as <value>-<value>-<value> and <value> did." in out
-    assert re.findall(r"^note (\S+)", out, re.MULTILINE) == ["clinicaltrials.gov-1"]
+    assert set(re.findall(r"^note (\S+)", out, re.MULTILINE)) == {note["id"] for note in notes}
 
 
 def test_apply_applies_checked_note_decisions_and_writes_the_digest(monkeypatch, capsys):
@@ -370,17 +375,17 @@ def test_apply_applies_checked_note_decisions_and_writes_the_digest(monkeypatch,
         "summary": f"One note retired, one added; {CANARY} was typed.",
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(reply)))
-    assert review_runs.main(["apply"]) == 0
+    assert review_runs.main(["apply", "--batch", review_runs.prepare_batch()["batch_id"]]) == 0
     assert stored(note_id)["retired"] == date.today().isoformat()
     added = stored("shop.example.net-1")
     assert (added["approved"], added["hint"], added["detail"], added["url"]) == (None, "scroll_first", detail, None)
     assert (added["failure"], added["runs"]) == ("jev_blocked", {"failed": [OTHER_FAILED], "recovered": RECOVERED})
     [digest] = digests()
-    assert digest["queue"]["runs"] == [FAILED, OTHER_FAILED, RECOVERED, blank_failed, blank_recovered]
-    assert sorted(digest["queue"]["notes"]) == sorted([note_id, *(seed["id"] for seed in site_notes.SEEDS)])
-    assert all(f"run {run_id} · queued" in digest["sent"] for run_id in digest["queue"]["runs"])
+    assert list(digest["acknowledged"]["runs"]) == [FAILED, OTHER_FAILED, RECOVERED, blank_failed, blank_recovered]
+    assert sorted(digest["acknowledged"]["notes"]) == sorted([note_id, *(seed["id"] for seed in site_notes.SEEDS)])
+    assert all(f"run {run_id} · queued" in digest["sent_text"] for run_id in list(digest["acknowledged"]["runs"]))
     # The blank runs' empty site is no name to keep: kept, it would put a mark between any two non-word characters.
-    assert f"goal: {GOAL}" in digest["sent"].splitlines()
+    assert f"goal: {GOAL}" in digest["sent_text"].splitlines()
     decisions =[(d["action"], d["applied"], d["outcome"]) for d in digest["decisions"]]
     assert decisions == [
         ("retire", True, "retired"),
@@ -434,7 +439,7 @@ def test_apply_refuses_bad_replies(change, reason, monkeypatch, capsys):
     write_run(OTHER_FAILED, site="clinicaltrials.gov")
     notes_before = site_notes.NOTES_PATH.read_bytes()
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({**EMPTY_REPLY, **change})))
-    review_runs.main(["apply"])
+    review_runs.main(["apply", "--batch", review_runs.prepare_batch()["batch_id"]])
     assert reason in capsys.readouterr().out
     assert site_notes.NOTES_PATH.read_bytes() == notes_before  # nothing approved, retired or changed
     assert not any(decision["applied"] for digest in digests() for decision in digest["decisions"])
@@ -478,7 +483,8 @@ def test_retire_restore_and_enable():
     state = {"last_start": "2026-09-27T10:00:00", "next_due": 1790000000, "running": None, "failures": 3, "off": True}
     site_notes.write_review_state(state)
     assert review_runs.main(["enable"]) == 0
-    assert site_notes.read_review_state() == {**state, "failures": 0, "off": False}
+    assert site_notes.read_review_state() == {**state, "failures": 0, "off": False,
+                                               "schema_version": 1, "accounted_attempt_ids": []}
 
 
 def test_auto_launch_is_pinned(launches, monkeypatch, tmp_path, capsys):
@@ -502,17 +508,19 @@ def test_auto_launch_is_pinned(launches, monkeypatch, tmp_path, capsys):
     site_notes.NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     site_notes.NOTES_PATH.write_text("[")
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(EMPTY_REPLY)))
-    commands = (["auto"], ["once", "--since", review_runs.AUTO_FROM], ["queue"], ["apply"])
+    commands = (["auto"], ["once", "--since", review_runs.AUTO_FROM], ["queue"],
+                ["apply", "--batch", "0" * 32])
     assert [review_runs.main(command) for command in commands] == [0, 1, 1, 1]
     printed = capsys.readouterr()
-    assert (printed.out + printed.err).count("cannot read the notes file") == len(commands)
+    assert "cannot read the notes file" in printed.err
+    assert "recovery" in printed.out
     assert launches.calls == [] and digests() == [] and not site_notes.REVIEW_STATE.exists()
     site_notes.NOTES_PATH.unlink()  # a missing file starts again from the seeds
     for command in (["auto"], ["once", "--since", review_runs.AUTO_FROM]):
         assert review_runs.main(command) == 0
         shutil.rmtree(review_runs.REVIEWS)  # no stamp and no digest, so the next command launches too
     assert review_runs.main(["preflight"]) == 0
-    assert digests() == [] and not site_notes.REVIEW_STATE.exists()  # the preflight writes no digest and no stamp
+    assert digests() == [] and "next_due" not in site_notes.read_review_state()  # no scheduling stamp
     claude = str((tmp_path / "bin" / "claude").resolve())
     auto, once, preflight = launches.calls
     for call, budget in ((auto, "0.5"), (once, "0.5"), (preflight, "0.05")):
@@ -583,7 +591,7 @@ def test_auto_respects_lock_stamp_threshold_and_failure_limit(case, launches, mo
         assert abs(started - time.time()) < 5
         assert (state["next_due"], state["running"]) == (started + review_runs.REVIEW_EVERY_HOURS * 3600, None)
     else:
-        assert (state["failures"], state["off"], state["running"]) == (3, True, None)
+        assert state == before  # Unknown legacy child ownership blocks dispatch without inventing a settlement.
 
 
 def test_auto_kills_after_15_minutes(launches, monkeypatch):
@@ -606,7 +614,7 @@ def test_auto_kills_after_15_minutes(launches, monkeypatch):
             self.function(*self.args)
 
     def stream():  # a session that prints nothing, then ignores SIGTERM
-        pending.extend(digests())  # a SIGKILL of the whole review here would leave this digest (7.4's X1)
+        pending.extend(json.loads(path.read_text()) for path in (review_runs.REVIEWS / "attempts").glob("*.json"))  # a SIGKILL of the whole review here would leave this digest (7.4's X1)
         timers[-1].fire()  # 15 minutes pass with no event: SIGTERM
         timers[-1].fire()  # still running EXIT_SECONDS later: SIGKILL, and the stream ends
         yield from ()
@@ -620,8 +628,8 @@ def test_auto_kills_after_15_minutes(launches, monkeypatch):
     assert (state["failures"], state["running"]) == (1, None)
     assert_failed_digest(launches, "no result within 15 minutes", run_ids)
     [digest] = pending
-    assert digest["failure"] == f"the review started at {state['last_start']} never recorded its end"
-    assert (digest["sent"], digest["queue"]["runs"]) == (launches.calls[0]["stdin"], run_ids)
+    assert digest["status"] == "running"
+    assert (digest["sent_text"], [item["id"] for item in digest["input_items"] if item["kind"] == "runs"]) == (launches.calls[0]["stdin"], run_ids)
 
 
 def test_once_reviews_a_window_and_records_cost(launches, monkeypatch):
@@ -632,37 +640,85 @@ def test_once_reviews_a_window_and_records_cost(launches, monkeypatch):
     reply = {**EMPTY_REPLY, "decisions": [retire(note_id, first)],
              "flags": [{"run": first, "reason": "Claude labelled it failed; the page looks right."}]}
     monkeypatch.setattr(review_runs.subprocess, "Popen", fake_popen(launches, INIT, result_event(reply, cost=0.0421)))
-
     def full_disk(prefix=""):
         raise OSError(28, "No space left on device")
-
-    # A crash after the start, here a full disk before the launch, is a failed review with its digest (7.4's X1).
     with monkeypatch.context() as crash:
         crash.setattr(review_runs.tempfile, "mkdtemp", full_disk)
         assert review_runs.main(["once", "--since", "2026-09-24"]) == 1
-    [path] = review_runs.REVIEWS.glob("2*.json")
-    crashed = json.loads(path.read_text())
-    assert crashed["failure"] == "the review crashed: OSError(28, 'No space left on device')"
-    assert (crashed["queue"]["runs"], launches.calls) == ([first, second], [])
+    [crashed] = [json.loads(path.read_text()) for path in (review_runs.REVIEWS / "attempts").glob("*.json")]
+    assert "No space left on device" in crashed["error"] and launches.calls == []
+    assert digests() == []
     assert (site_notes.read_review_state()["running"], site_notes.read_review_state()["failures"]) == (None, 1)
-    path.unlink()
-
-    def no_lock(change, path=site_notes.NOTES_PATH):  # the notes' lock cannot be opened
-        raise PermissionError(13, "Permission denied")
-
-    # A decision the notes file cannot take is refused, and the review still records its digest.
-    monkeypatch.setattr(site_notes, "update", no_lock)
-    assert review_runs.main(["once", "--since", "2026-09-24"]) == 0  # 2 runs, under the automatic threshold
-    [path] = sorted(review_runs.REVIEWS.glob("2*.json"))
-    digest = json.loads(path.read_text())
-    assert sorted(digest) == ["cost", "decisions", "flags", "proposals", "queue", "sent", "summary"]
-    assert digest["queue"]["runs"] == [first, second]
-    assert digest["sent"] == launches.calls[0]["stdin"] and before_window not in digest["sent"]
+    assert review_runs.main(["once", "--since", "2026-09-24"]) == 0
+    [digest] = digests()
+    assert list(digest["acknowledged"]["runs"]) == [first, second]
+    assert digest["sent_text"] == launches.calls[0]["stdin"] and before_window not in digest["sent_text"]
     assert (digest["cost"], digest["flags"]) == (0.0421, reply["flags"])
-    refused = {**retire(note_id, first), "applied": False, "outcome": "[Errno 13] Permission denied"}
-    assert digest["decisions"] == [refused]
+    assert digest["decisions"] == [{**retire(note_id, first), "applied": True, "outcome": "retired"}]
     state = site_notes.read_review_state()
-    started = datetime.fromisoformat(state["last_start"])
-    assert path.stem == started.strftime("%Y%m%d-%H%M%S")
     assert (state["running"], state["failures"]) == (None, 0)
-    assert state["next_due"] == started.timestamp() + review_runs.REVIEW_EVERY_HOURS * 3600
+    assert state["next_due"] == int(datetime.fromisoformat(state["last_start"]).timestamp() + 86400)
+
+
+@pytest.mark.parametrize('action,field,applied', [('add', 'note', True), ('flag', 'detail', True),
+                                                ('flag', 'note', False), ('retire', 'detail', True)])
+def test_note_checks_read_only_the_fields_each_action_uses(action, field, applied, capsys):
+    note_id = unapproved_note()
+    write_run(FAILED, history=[typed_step(CANARY)])
+    write_run(RECOVERED, status='done', previous_run=FAILED)
+    decision = {**retire(note_id, FAILED, RECOVERED), 'action': action,
+                'hint': 'scroll_first' if action == 'add' else '', 'detail': '', field: CANARY}
+    path, problems = review_runs.record_review({**EMPTY_REPLY, 'decisions': [decision]}, review_runs.prepare_batch(),
+                                              '', datetime.now(), None)
+    assert not problems
+    data = json.loads(path.read_text())
+    assert data['decisions'][0]['applied'] is applied
+    if not applied:
+        assert data['decisions'][0]['outcome'] == 'its note holds a value from a task'
+    assert CANARY not in path.read_text() + capsys.readouterr().out
+
+
+@pytest.mark.parametrize('case', ['detail', 'retire'])
+def test_a_decisions_outcome_is_kept_whole(case, capsys):
+    note_id = unapproved_note()
+    write_run(FAILED, site='other.example.net', history=[typed_step('from'), typed_step('example.com')])
+    if case == 'detail':
+        decision = {**retire(note_id, FAILED), 'action': 'add', 'hint': 'scroll_first', 'detail': 'from'}
+        expected = 'its detail holds a value from a task'
+    else:
+        decision, expected = retire(note_id, FAILED), f"it cites no queued run on {note_id}'s site"
+    path, problems = review_runs.record_review({**EMPTY_REPLY, 'decisions': [decision]}, review_runs.prepare_batch(),
+                                              '', datetime.now(), None)
+    assert not problems
+    assert json.loads(path.read_text())['decisions'][0]['outcome'] == expected
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('case', ['schema', 'result'])
+def test_a_failure_never_quotes_a_task_value(case, capsys):
+    write_run(FAILED, history=[typed_step(CANARY), typed_step('reply'), typed_step('ended')])
+    queue = review_runs.build_queue()
+    quote_value = review_runs.privacy_quote(queue)
+    if case == 'schema':
+        path, problems = review_runs.record_review({**EMPTY_REPLY, CANARY: 'bad'}, review_runs.prepare_batch(), '', datetime.now(), None)
+        assert path is None
+        text = '; '.join(problems)
+        assert text == 'reply has an unknown key <value>'
+        nested = review_runs.schema_errors({**EMPTY_REPLY, 'decisions': [{CANARY: ''}]},
+                                          review_runs.REVIEW_SCHEMA, quote=quote_value)
+        assert any('unknown key <value>' in problem for problem in nested)
+    else:
+        text = review_runs.result_failure({'subtype': CANARY, 'result': CANARY}, quote_value)
+        assert text == 'the review ended with <value>: <value>'
+    failure_path = review_runs.write_digest(datetime.now(), {'failure': text})
+    print(text)
+    assert CANARY not in failure_path.read_text() + capsys.readouterr().out
+
+
+def test_overlapping_task_values_are_replaced_together():
+    values = {'jane smith', 'smith bo lee'}
+    pattern, text = site_notes.task_value_pattern(values), 'jane smith bo lee'
+    kept = review_runs.kept_names({'jane smith'})
+    assert review_runs.scrub(text, review_runs.scrubber(values, {'jane smith'})) == '<value>'
+    assert review_runs.without_values(text, pattern, kept, set()) == '<value>'
+    assert review_runs.holds_value(text, pattern, kept, set())

@@ -36,6 +36,12 @@
             <option value="research">Reading room · fixture</option>
           </select>
         </div>
+        <label for="allowed-operations">Allowed operations</label>
+        <select id="allowed-operations" name="allowed_operations">
+          <option value='["CLICK","TYPE_TEXT","SELECT","SCROLL_UP","SCROLL_DOWN","WAIT"]'>Interact with page</option>
+          <option value='[]'>Read only</option>
+          <option value='["WAIT"]'>Read and wait</option>
+        </select>
         <div class="task-row">
           <textarea id="goal" name="goal" rows="5"></textarea
           ><button type="submit" id="start" class="primary">

@@ -1,8 +1,10 @@
 """Local-browser freshness/execution regressions. No model calls or external websites."""
 
+import argparse
+import os
 from urllib.parse import quote
 
-from jev_ultrafast.browser import Browser, StalePage
+from validation_lab import RuntimeGuard, configure_native
 
 HTML = """<!doctype html><title>Guard checks</title>
 <style>body{margin:30px}button{width:180px;height:50px}#outside{position:absolute;top:3000px}</style>
@@ -19,6 +21,13 @@ DIALOG_AND_POPUP = """<!doctype html><title>Dialog and pop-up checks</title>
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lab-manifest", required=True)
+    manifest = configure_native(parser.parse_args().lab_manifest)
+    RuntimeGuard(manifest).install()
+    os.chdir(manifest["state"])
+    from jev_ultrafast.browser import Browser, StalePage
+
     browser = Browser("data:text/html," + quote(HTML))
     passed = []
     try:

@@ -6,6 +6,7 @@ import re
 import secrets
 import statistics
 import sys
+import time
 from collections import Counter
 from datetime import date, datetime, timedelta
 from itertools import takewhile
@@ -15,6 +16,9 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 from examples.flights import verify  # noqa: E402
+from jev_ultrafast import review_records
+
+from jev_ultrafast.contracts import token_usage, validate_allowed_operations  # noqa: E402
 from jev_ultrafast.site_notes import (  # noqa: E402
     EXCLUDE_PATH,
     HOST,
@@ -99,6 +103,11 @@ def flights_verdict(run):
 
 def facts(run):
     decisions, result = run["decisions"], run.get("result", {})
+    token_counts = {
+        "TypeSafe input tokens": token_usage(decisions, "input_tokens"),
+        "text prompt tokens": token_usage(run["text_calls"], "prompt_tokens"),
+        "text completion tokens": token_usage(run["text_calls"], "completion_tokens"),
+    }
     claude, user = latest(run, "claude"), latest(run, "user")
     confidences = [c for d in decisions for c in (d["confidence"], d["target_confidence"]) if c is not None]
     # allowed_sites starts with the start page's site; history URLs are read after each action.
@@ -114,6 +123,9 @@ def facts(run):
         "group": (run["source"], "+".join(sorted({d["model"] for d in decisions})) or "none"),
         "site": start_site,
         "status": result.get("status", "incomplete"),
+        "policy": (
+            ", ".join(sorted(validate_allowed_operations(run["allowed_operations"]))) or "[] (observation only)"
+        ) if "allowed_operations" in run else "legacy: policy not recorded",
         "label": claude if user is None else user,
         "claude": claude,
         "user": user,
@@ -129,10 +141,9 @@ def facts(run):
             "runs with omitted actions": any(d["omitted_actions"] > 0 for d in decisions),
             "site changes": len(hosts) > 1,
             "stale decisions": run["stale_decisions"],
-            "TypeSafe input tokens": sum(d["usage"].get("input_tokens", 0) for d in decisions),
-            "text prompt tokens": sum(t["usage"].get("prompt_tokens", 0) for t in run["text_calls"]),
-            "text completion tokens": sum(t["usage"].get("completion_tokens", 0) for t in run["text_calls"]),
+            **{key: values[0] for key, values in token_counts.items()},
         },
+        "unknown_token_calls": {key: values[1] for key, values in token_counts.items()},
         "failure": failure,
         "final_site": run_site(run) or "no site",
         "stale_budget": stale_budget(run),
@@ -173,6 +184,13 @@ def summary(name, rows):
     by_confidence = {b: [r["label"] for r in labeled if r["lowest_confidence"] == b] for b in CONFIDENCE_BANDS}
     commit_bands = Counter(b for r in rows for b in r["commit_bands"])
     failures = Counter(r["site"] for r in labeled if not r["label"])
+
+    def total_line(key):
+        total = sum(row["totals"][key] for row in rows)
+        unknown = sum(row.get("unknown_token_calls", {}).get(key, 0) for row in rows)
+        calls = "call" if unknown == 1 else "calls"
+        return f"{key} {total}" + (f" known; {unknown} {calls} unknown" if unknown else "")
+
     fields = [
         f"{name} (anecdote)" if len(labeled) < MIN_LABELED else name,
         f"runs {len(rows)}, labeled {len(labeled)}, labeled by both {len(both)}",
@@ -184,11 +202,12 @@ def summary(name, rows):
         f"Claude agrees with verify() {rate(sum(r['claude'] == r['verify'] for r in checked), len(checked))}",
         f"Claude agrees with user {rate(sum(r['claude'] == r['user'] for r in both), len(both))}",
         "stops " + ", ".join(f"{status} {n}" for status, n in sorted(Counter(r["status"] for r in rows).items())),
+        "operation policy " + ranked(Counter(r["policy"] for r in rows)),
         f"median run {statistics.median(r['elapsed_ms'] for r in rows):.0f} ms",
         f"median Jev {statistics.median(latencies):.0f} ms" if latencies else "median Jev n/a",
         "pass by lowest confidence " + ", ".join(f"{b} {rate(sum(v), len(v))}" for b, v in by_confidence.items()),
         "CLICK/SELECT by commit_probability " + ", ".join(f"{b} {commit_bands[b]}" for b in COMMIT_BANDS),
-        *(f"{key} {sum(r['totals'][key] for r in rows)}" for key in rows[0]["totals"]),
+        *(total_line(key) for key in rows[0]["totals"]),
     ]
     return " · ".join(fields)
 
@@ -355,29 +374,28 @@ def review_lines(reviews, kept, exclude, left_out):
     waiting = [note for note in kept if not note["approved"] and not note["retired"] and active(note, today)]
     details = shown([f"  {note['id']}: {one_line(note['detail'])}" for note in waiting if note["detail"]])
     block, costs, failures, latest = under_heading("details of notes waiting for approval:", details), [], 0, None
-    for path in sorted(reviews.glob("*.json")):
-        if not DIGEST_NAME.fullmatch(path.stem):
-            continue  # state.json, not a digest
-        try:
-            digest = json.loads(path.read_text())
-            failed = "failure" in digest  # a failed review's digest holds its reason, and no decisions
-            if failed:
-                items = [f"  {one_line(digest['failure'])}"]
-            else:
-                items = [decision_line(decision) for decision in digest["decisions"]]
-                proposals = [f"  {fields(item)}" for item in digest["proposals"]]
-                flags = [f"  {fields(item)}" for item in digest["flags"]]
-            cost = digest.get("cost")
-        except Exception as error:  # one unreadable digest must not hide the others
-            print(f"skipped {path}: {error!r}", file=sys.stderr)
+    cost_keys = set()
+    records, errors = review_records.report_records(reviews)
+    for path, error in errors:
+        print(f"skipped {path}: invalid review record", file=sys.stderr)
+    for path, digest in records:
+        status = digest["status"]
+        if status in {"claimed", "spawning", "running"}:
+            status = "uncertain" if digest.get("deadline", float("inf")) <= time.time() else "running"
+        failed = status in {"failed", "uncertain", "abandoned"}
+        if digest["cost_key"] not in cost_keys:
+            costs.append(digest["reported_cost"])
+            cost_keys.add(digest["cost_key"])
+        if status != "committed":
+            failures += int(failed)
+            items = [f"  {one_line(digest.get('failure') or digest.get('error') or '')}"]
+            block += [f"{path}: {status}", *shown(items)]
             continue
-        costs.append(cost)
-        if failed:
-            failures += 1
-            block += [f"{path}: failed", *shown(items)]
-        else:
-            block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
-            latest = path, proposals, flags
+        items = [decision_line(decision) for decision in digest.get("decisions", [])]
+        proposals = [f"  {fields(item)}" for item in digest.get("proposals", [])]
+        flags = [f"  {fields(item)}" for item in digest.get("flags", [])]
+        block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
+        latest = path, proposals, flags
     if latest:
         # Delegated decision P19 (docs/failure-review-plan.md): open proposals and label flags are the latest
         # successful review's, each group under its digest's path; older ones stay in their digests.

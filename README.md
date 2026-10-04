@@ -80,16 +80,20 @@ with Agent(
     "https://www.google.com/travel/flights?hl=en",
     f"Find one-way flights from Zurich to London on {departure:%B} {departure.day}, {departure.year}, "
     "for one adult in economy. Stop when matching flight options are visible.",
+    allowed_operations=["CLICK", "TYPE_TEXT", "SELECT", "SCROLL_UP", "SCROLL_DOWN", "WAIT"],
 ) as agent:
     for state in agent.run():
         print(state["elapsed_ms"], state["status"])
 ```
 
-Run with `uv run --env-file .env python your_script.py`. Every run, including the inspector's, stops before input on a site other than its start site unless `allowed_sites` names it. The same policy can run a different task:
+Run with `uv run --env-file .env python your_script.py`. Every goal, including `new_goal` and MCP continuations, requires an explicit `allowed_operations` list. Use `[]` for observation and terminal answers, or `["WAIT"]` to also wait. Element numbers and visible field evidence stay the same under restricted policies. The executor checks permissions before text generation and input; `allow_commit` cannot broaden them. Explicit starting-URL navigation is separate setup. Invalid goals or policies preserve the previous run. Refused choices stop with `operation_not_allowed` and saved diagnostics; older reports say `legacy: policy not recorded`.
+
+Every run, including the inspector's, stops before input on a site other than its start site unless `allowed_sites` names it. The same policy can run a different task:
 
 ```bash
 uv run --env-file .env python examples/run.py \
   --url https://en.wikipedia.org/wiki/Main_Page \
+  --allowed-operations CLICK TYPE_TEXT SELECT SCROLL_UP SCROLL_DOWN WAIT \
   --goal 'Find and open the Wikipedia article about Gödel’s incompleteness theorems.'
 ```
 
@@ -113,6 +117,15 @@ Claude delegates a bounded browser sub-goal with `run_goal`, checks the returned
 - **Keep hidden tabs rendering.** Focus emulation prevents background animation throttling without switching Chrome's visible tab.
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
+
+Every entry path shares a 90-second execution budget beginning with the first `tick`, `predict`, or `act`.
+The 120th stale outcome stops before another recovery read; a changed page does not refill that budget.
+Deadline and cancellation checks prevent new input, while an already confirmed mouse or key press receives its
+single matching release. Unconfirmed input is retained as an uncertain attempt and is never automatically repeated.
+These limits are cooperative: HTTP phases and CDP responses are bounded by the remaining budget, while an in-flight
+request or IPC connection can still finish later. Completed late model calls retain their measured latency and known
+usage; missing usage is shown as unknown. MCP setup time and its one best-effort final read are reported separately;
+the final read has a five-second budget and cannot resume a stopped run.
 
 Every executed target is resolved from an observed node. The executor rechecks page freshness and click occlusion. Model output never becomes selectors, coordinates, shell commands, or executable JavaScript. Text-helper output must parse as a small JSON object before typing.
 

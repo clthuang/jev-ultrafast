@@ -51,6 +51,9 @@ JEV_SERVER = json.dumps(
 ENDING = "End your reply with exactly one line: DONE: <what you checked> or FAILED: <why>."
 PROMPTS = {
     "executor": "{goal}\nStart at {url}. Do this with the jev-ultrafast run_goal tool. "
+    "Every call requires allowed_operations: explicitly list only the CLICK, TYPE_TEXT, SELECT, SCROLL_UP, "
+    "SCROLL_DOWN and WAIT operations this goal authorizes, including on continuations. "
+    "Use [] for observation only; never broaden the list after a refusal. "
     "Verify the result, then call report_outcome.\n" + ENDING,
     "chrome": "{goal}\nStart at {url}. Use only the Claude in Chrome browser tools: first call select_browser "
     "with deviceId {device}, then open a new tab. Do not call run_goal.\n" + ENDING,

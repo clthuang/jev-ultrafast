@@ -17,6 +17,35 @@ from browser_harness.helpers import cdp
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+# One synchronous browser task owns both validation and mutation. No await, retry, or value-based fallback.
+SELECT_ACTION = """(({action,page_key,guard}) => {
+  const rejected=reason=>({status:'rejected_before_input',reason});
+  const cache=window.__jevFast, option=action.option;
+  if (!cache || !option || option.document_id!==performance.timeOrigin || option.cache_epoch!==cache.epoch)
+    return rejected('Dropdown document or cache changed');
+  if (!Number.isInteger(action.node) || option.select_id!==action.node || !Number.isInteger(option.option_id) ||
+      !Number.isInteger(option.observed_index) || option.observed_index<0 || option.selected!==false ||
+      option.effective_disabled!==false || !Array.isArray(page_key) || !Array.isArray(guard))
+    return rejected('Dropdown descriptor is invalid');
+  const select=cache.nodes.get(option.select_id), chosen=cache.nodes.get(option.option_id);
+  if (!select?.isConnected || select.tagName!=='SELECT' || select.multiple || !chosen?.isConnected ||
+      chosen.tagName!=='OPTION' || chosen.closest('select')!==select ||
+      select.options[option.observed_index]!==chosen) return rejected('Dropdown option identity changed');
+  const disabled=select.matches(':disabled') || chosen.disabled || !!chosen.closest('optgroup[disabled]');
+  if (disabled!==option.effective_disabled || chosen.label!==option.label || chosen.value!==option.value ||
+      chosen.selected!==option.selected) return rejected('Dropdown option meaning or state changed');
+  if (select.closest('[aria-disabled="true"],[aria-hidden="true"],[inert]') ||
+      !select.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return rejected('Dropdown is unavailable');
+  if (JSON.stringify(cache.pageKey())!==JSON.stringify(page_key) ||
+      JSON.stringify(cache.guard(select))!==JSON.stringify(guard)) return rejected('Dropdown page context changed');
+  const r=select.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+  if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight ||
+      !select.contains(document.elementFromPoint(x,y))) return rejected('Dropdown is covered or outside the viewport');
+  select.selectedIndex=option.observed_index;
+  select.dispatchEvent(new Event('input',{bubbles:true}));
+  select.dispatchEvent(new Event('change',{bubbles:true}));
+  return {status:'executed',action_id:action.id};
+})"""
 # lsof lives in /usr/sbin on macOS, which a minimal PATH leaves out.
 LSOF = shutil.which("lsof", path="/usr/sbin:/usr/bin:/sbin:/bin")
 
@@ -45,6 +74,27 @@ def foreign_browser_port():
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
+
+
+class UncertainAction(RuntimeError):
+    """A dispatched mutation may have executed; preserve its attempt and never retry it."""
+
+
+def checked_cdp(method, *, session_id, check_stop=None, remaining_budget=None, **params):
+    """Cooperative read bounds; the IPC connection has its separate normal bounded timeout."""
+    if check_stop:
+        check_stop()
+    if remaining_budget:
+        params["_response_timeout"] = min(5, remaining_budget())
+    try:
+        result = cdp(method, session_id=session_id, **params)
+    except Exception:
+        if check_stop:
+            check_stop()
+        raise
+    if check_stop:
+        check_stop()
+    return result
 
 
 class Browser:
@@ -82,16 +132,19 @@ class Browser:
             raise
 
     def call(self, method, **params):
-        return cdp(method, session_id=self.session, **params)
+        return checked_cdp(method, session_id=self.session, **params)
 
-    def evaluate(self, expression):
-        response = self.call("Runtime.evaluate", expression=expression, returnByValue=True)
+    def evaluate(self, expression, **control):
+        response = self.call("Runtime.evaluate", expression=expression, returnByValue=True, **control)
         if response.get("exceptionDetails"):
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
 
-    def observe(self, screenshot=True):
-        if getattr(self, "after_input", None):
+    def observe(self, screenshot=True, *, check_stop=None, remaining_budget=None, max_attempts=10, settle_input=True):
+        control = {"check_stop": check_stop, "remaining_budget": remaining_budget} if check_stop else {}
+        if check_stop:
+            check_stop()
+        if settle_input and getattr(self, "after_input", None):
             action, self.after_input = self.after_input, None
             # This is read-only and happens after execution was logged, even if navigation interrupts it.
             try:
@@ -120,38 +173,47 @@ class Browser:
                     }))(""" + json.dumps(action) + ")",
                     awaitPromise=True,
                     returnByValue=True,
+                    **control,
                 )
             except RuntimeError:
                 pass
-        for attempt in range(10):
+        for attempt in range(max_attempts):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {"operation": "observe", "session": self.session, "screenshot": screenshot}, **control,
                 )
             except StalePage:
-                if attempt == 9:
+                if attempt == max_attempts - 1:
                     raise
-                time.sleep(0.02)
+                if check_stop:
+                    check_stop()
+                time.sleep(min(0.02, remaining_budget()) if remaining_budget else 0.02)
         raise StalePage("Page did not settle")
 
-    def fresh(self, page, action=None):
+    def fresh(self, page, action=None, **control):
         if action is not None and action["kind"] in {"click", "select"}:
             node = action["node"]
             if type(node) is not int:
                 return False
             current = self.evaluate(
                 "(() => { const c=window.__jevFast; "
-                f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()"
+                f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()", **control,
             )
             return current == [page["page_key"], page["guards"].get(str(node))]
-        return self.evaluate(MARKER) == page["marker"]
+        return self.evaluate(MARKER, **control) == page["marker"]
 
-    def act(self, action, page, text=None):
-        if not self.fresh(page, action):
+    def act(self, action, page, text=None, *, check_stop=None, remaining_budget=None, on_phase=None):
+        control = {"check_stop": check_stop, "remaining_budget": remaining_budget} if check_stop else {}
+        if check_stop:
+            check_stop()
+        if action["kind"] != "select" and not self.fresh(page, action, **control):
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
-            time.sleep(0.1)
-        result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
+            time.sleep(min(0.1, remaining_budget()) if remaining_budget else 0.1)
+        result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text,
+                                    "page_key": page.get("page_key"),
+                                    "guard": page.get("guards", {}).get(str(action.get("node")))},
+                                   on_phase=on_phase, **control)
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
@@ -178,15 +240,70 @@ class Browser:
 
 def fingerprint(state):
     content = {k: state[k] for k in ("url", "text", "actions", "scroll")}
+    content["actions"] = [
+        {**action, "option": {key: value for key, value in action["option"].items()
+                              if key not in {"document_id", "cache_epoch"}}} if "option" in action else action
+        for action in state["actions"]
+    ]
+    if state.get("evidence"):
+        content["evidence"] = state["evidence"]
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
-def browser_operation(request):
+def browser_operation(request, *, check_stop=None, remaining_budget=None, on_phase=None):
     operation = request["operation"]
     session = request["session"]
 
     def call(method, **params):
-        return cdp(method, session_id=session, **params)
+        return checked_cdp(method, session_id=session, check_stop=check_stop,
+                           remaining_budget=remaining_budget, **params)
+
+    input_started = False
+
+    def phase(name, *, persist=True):
+        if on_phase:
+            on_phase(name, input_started, persist=persist)
+
+    def mutate(method, phase_name, *, release=False, **params):
+        nonlocal input_started
+        if not release:
+            if check_stop:
+                check_stop()
+            phase(phase_name + "_pending")
+            if check_stop:
+                check_stop()  # Persisting intent can itself take time.
+            if remaining_budget:
+                params["_response_timeout"] = min(5, remaining_budget())
+        # A confirmed press's release has the normal bounded timeout, even after expiry or cancellation.
+        input_started = True
+        phase(phase_name + "_dispatched", persist=False)
+        try:
+            return cdp(method, session_id=session, **params)
+        except BaseException as error:
+            phase(phase_name + "_uncertain", persist=False)
+            if not isinstance(error, Exception):
+                raise  # Keep cancellation/interrupt transport semantics, with uncertain dispatch evidence.
+            message = ("Dropdown" if phase_name == "select" else "Browser input") + (
+                " execution reply was lost; inspect before starting another goal."
+            )
+            raise UncertainAction(message) from error
+
+    def pair(method, press, release, phase_name, *, completes_action=False):
+        mutate(method, phase_name + "_press", **press)
+        pending_error = None
+        try:
+            phase(phase_name + "_pressed", persist=not completes_action)
+        except BaseException as error:
+            pending_error = error
+        try:
+            mutate(method, phase_name + "_release", release=True, **release)
+            phase(phase_name + "_released", persist=not completes_action)
+        except BaseException as release_error:
+            if pending_error is None:
+                raise
+            raise pending_error from release_error
+        if pending_error is not None:
+            raise pending_error
 
     def evaluate(expression):
         result = call("Runtime.evaluate", expression=expression, returnByValue=True)
@@ -199,8 +316,27 @@ def browser_operation(request):
     if operation == "act":
         action = request["action"]
         kind = action["kind"]
+        if kind == "select":
+            payload = {"action": action, "page_key": request.get("page_key"), "guard": request.get("guard")}
+            response = mutate("Runtime.evaluate", "select",
+                              expression=SELECT_ACTION + "(" + json.dumps(payload) + ")", returnByValue=True)
+            try:
+                result = response.get("result", {}).get("value") if "exceptionDetails" not in response else None
+            except Exception as error:
+                raise UncertainAction(
+                    "Dropdown execution reply was lost; inspect before starting another goal."
+                ) from error
+            if (isinstance(result, dict) and set(result) == {"status", "reason"}
+                    and result["status"] == "rejected_before_input" and isinstance(result["reason"], str)):
+                input_started = False
+                phase("rejected_before_input", persist=False)
+                raise StalePage(result["reason"])
+            if result != {"status": "executed", "action_id": action["id"]}:
+                raise UncertainAction("Dropdown execution was not confirmed; inspect before starting another goal.")
+            return {"executed": action["id"]}
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            mutate("Input.dispatchMouseEvent", "scroll", type="mouseWheel", x=550, y=650,
+                   deltaX=0, deltaY=action["delta"])
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
@@ -214,42 +350,22 @@ def browser_operation(request):
               if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
               const hit=document.elementFromPoint(x,y);
               if (!e.contains(hit)) return hit ? {covered:hit.localName.slice(0,40)} : null;
-              if (action.kind==='select') {
-                if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
-                    !o.disabled && !o.closest('optgroup[disabled]'))) return null;
-                e.value=action.value;
-                e.dispatchEvent(new Event('input',{bubbles:true}));
-                e.dispatchEvent(new Event('change',{bubbles:true}));
-              }
               return {x,y};
             })(""" + json.dumps(action) + ")")
             if target is None or "covered" in target:
-                if kind == "select":
-                    raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
                 if target:  # the topmost element at the target's center; its tag name is page-controlled text
                     raise StalePage(f"Target is covered by <{target['covered']}>. Observe again.")
                 raise StalePage("Target changed or is covered. Observe again.")
             if kind != "select":
                 x, y = target["x"], target["y"]
-                for event in ("mousePressed", "mouseReleased"):
-                    call("Input.dispatchMouseEvent", type=event, x=x, y=y, button="left", clickCount=1)
+                position = {"x": x, "y": y, "button": "left", "clickCount": 1}
+                pair("Input.dispatchMouseEvent", {"type": "mousePressed", **position},
+                     {"type": "mouseReleased", **position}, "mouse", completes_action=kind == "click")
                 if kind == "fill":
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyDown",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                        commands=["selectAll"],
-                    )
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyUp",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                    )
-                    call("Input.insertText", text=request["text"])
+                    key = {"key": "a", "code": "KeyA", "modifiers": 4 if sys.platform == "darwin" else 2}
+                    pair("Input.dispatchKeyEvent", {"type": "keyDown", "commands": ["selectAll"], **key},
+                         {"type": "keyUp", **key}, "select_all")
+                    mutate("Input.insertText", "text", text=request["text"])
         return {"executed": action["id"]}
 
     info = evaluate(READ_STATE)

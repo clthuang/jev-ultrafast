@@ -12,6 +12,8 @@ from jev_ultrafast import agent as loop
 from jev_ultrafast import model, site_notes
 from jev_ultrafast.browser import StalePage, browser_operation, fingerprint
 
+ALL_OPERATIONS = ["CLICK", "TYPE_TEXT", "SELECT", "SCROLL_UP", "SCROLL_DOWN", "WAIT"]
+
 
 def page():
     state = {
@@ -35,10 +37,14 @@ def choice(ids, selected):
 
 
 def decision(action="e1"):
+    operation, target = {
+        "e1": ("TYPE_TEXT", "1"), "e2": ("CLICK", "1"), "e3": ("CLICK", "2"),
+        "wait": ("WAIT", None), "DONE": ("DONE", None), "BLOCKED": ("BLOCKED", None),
+    }[action]
     return {
         "choice": action,
-        "operation": "TYPE_TEXT",
-        "target": "1",
+        "operation": operation,
+        "target": target,
         "confidence": 1.0,
         "probabilities": {action: 1.0},
         "latency_ms": 10,
@@ -91,7 +97,7 @@ def test_all_heads_are_one_request_and_only_matching_head_executes(monkeypatch):
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", post)
-    d = model.choose(page(), "Find a book", [])
+    d = model.choose(page(), "Find a book", [], ALL_OPERATIONS)
     assert len(calls) == 1
     assert d["operation"] == "TYPE_TEXT" and d["target"] == "1" and d["choice"] == "e1"
     assert set(calls[0]["questions"]) == {"operation", "click_target", "type_text_target", "commit_1", "commit_2"}
@@ -111,7 +117,7 @@ def test_click_cannot_consume_a_text_target(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", post)
     with pytest.raises(ValueError, match="Invalid TypeSafe"):
-        model.choose(page(), "Find a book", [])
+        model.choose(page(), "Find a book", [], ALL_OPERATIONS)
 
 
 def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch):
@@ -138,7 +144,7 @@ def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", post)
-    d = model.choose(p, "Search with free cancellation", [])
+    d = model.choose(p, "Search with free cancellation", [], ALL_OPERATIONS)
     assert d["choice"] == "e3"
 
 
@@ -169,7 +175,7 @@ def test_missing_typesafe_key_names_the_variable(monkeypatch, key):
     post = Mock()
     monkeypatch.setattr(model, "post_json", post)
     with pytest.raises(ValueError, match="TYPESAFE_API_KEY is not set"):
-        model.choose(page(), "Find a book", [])
+        model.choose(page(), "Find a book", [], ALL_OPERATIONS)
     post.assert_not_called()
 
 
@@ -201,7 +207,7 @@ def test_commit_question_rides_in_the_same_request(monkeypatch):
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", post)
-    d = model.choose(page(), "Find a book", [])
+    d = model.choose(page(), "Find a book", [], ALL_OPERATIONS)
     commits = {q: v for q, v in calls[0]["questions"].items() if q.startswith("commit_")}
     assert len(calls) == 1 and d["choice"] == "e3" and d["commit_probability"] == 0.9
     assert set(commits) == {"commit_1", "commit_2"} and commits["commit_2"]["type"] == "noul"
@@ -213,7 +219,7 @@ def test_commit_probability_is_zero_without_a_click_or_select_target(monkeypatch
     # The unused commit answer is invalid, and is neither validated nor consumed.
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", lambda _u, _k, body: commit_answers(body, "TYPE_TEXT", "1", commit_1={}))
-    assert model.choose(page(), "Find a book", [])["commit_probability"] == 0
+    assert model.choose(page(), "Find a book", [], ALL_OPERATIONS)["commit_probability"] == 0
 
 
 @pytest.mark.parametrize("answer", [{}, {"noul": 1.5}, {"noul": float("nan")}, {"noul": "0.9"}])
@@ -221,7 +227,7 @@ def test_invalid_commit_answer_is_rejected(monkeypatch, answer):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", lambda _u, _k, body: commit_answers(body, "CLICK", "2", commit_2=answer))
     with pytest.raises(ValueError, match="Invalid TypeSafe"):
-        model.choose(page(), "Find a book", [])
+        model.choose(page(), "Find a book", [], ALL_OPERATIONS)
 
 
 @pytest.fixture
@@ -235,7 +241,7 @@ def runner():
     p = page()
     a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p))
     # The real builder, so every state key the Agent adds is present here too.
-    a._fresh_state("Find a book", p, None)
+    a._fresh_state("Find a book", p, None, allowed_operations=ALL_OPERATIONS)
     a.state.update(decision=decision(), status="predicted", started_at=time.perf_counter())
     return a
 
@@ -313,13 +319,13 @@ def test_visible_progress_between_waits_restarts_the_count(between, runner, monk
         runner.state["decision"] = decision("wait" if between.startswith("a WAIT") else "e3")
         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     elif between == "a read before Jev's answer that changed":
-        monkeypatch.setattr(loop, "choose", lambda *_: decision("wait"))
+        monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("wait"))
         runner.state["browser"].fresh.return_value = False  # the page changed after the last step's read
         runner.state["browser"].observe.return_value = changed
         runner.command("predict", {})
         runner.state["browser"].fresh.return_value = True
     else:
-        monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+        monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
         runner.state["browser"].act.side_effect = StalePage("Page changed since this decision. Observe again.")
         runner.state["browser"].observe.side_effect = (
             [changed] if between == "a stale answer whose re-read changed" else StalePage("Page did not settle")
@@ -341,7 +347,7 @@ def test_no_visible_progress_between_waits_keeps_the_count(between, runner, monk
         runner.state["decision"] = decision("e3")
         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     else:
-        monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+        monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
         runner.state["browser"].act.side_effect = StalePage("Target is covered by <div>. Observe again.")
         runner.command("tick")  # the re-read matches the read Jev answered on
         runner.state["browser"].act.side_effect = None
@@ -697,7 +703,7 @@ def test_new_goal_resets_every_counter(runner):
     runner.state.update(
         history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5
     )
-    runner.new_goal("  Open the cart  ", allowed_sites=["shop.test"])
+    runner.new_goal("  Open the cart  ", allowed_sites=["shop.test"], allowed_operations=ALL_OPERATIONS)
     state = runner.state
     assert (state["history"], state["decisions"], state["text_calls"], state["stale_decisions"]) == ([], [], [], 0)
     assert state["stale_streak"] == 0
@@ -719,7 +725,7 @@ def test_tick_survives_a_slow_navigation(runner):
 
 
 def test_stale_decisions_count_only_dropped_decisions(runner, monkeypatch):
-    monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+    monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
     runner.state["browser"].act.side_effect = StalePage("Page changed since this decision. Observe again.")
     runner.command("tick")
     assert runner.state["stale_decisions"] == 1
@@ -741,7 +747,7 @@ def test_three_stale_choices_on_an_unchanged_page_block(runner, monkeypatch):
 
 
 def test_stale_streak_restarts_on_a_changed_page_a_failed_read_or_a_step(runner, monkeypatch):
-    monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+    monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
     covered, unsettled = StalePage("Target is covered by <div>. Observe again."), StalePage("Page did not settle")
     changed = dict(page(), text="Results")
     changed["fingerprint"] = fingerprint(changed)
@@ -767,13 +773,13 @@ def test_site_boundary_blocks_before_input(runner):
 
 def test_site_boundary_allows_subdomains_and_star(runner):
     start = dict(page(), url="https://www.example.test/")
-    runner._fresh_state("Find a book", start, ["https://www.Shop.test/cart"])
+    runner._fresh_state("Find a book", start, ["https://www.Shop.test/cart"], allowed_operations=ALL_OPERATIONS)
     assert runner.state["allowed_sites"] == ["example.test", "shop.test"]
     runner.state["started_at"] = time.perf_counter()
     for url in ["https://accounts.example.test/", "https://shop.test/cart"]:
         runner.state["page"] = dict(start, url=url)
         act(runner)
-    runner._fresh_state("Find a book", start, ["*"])
+    runner._fresh_state("Find a book", start, ["*"], allowed_operations=ALL_OPERATIONS)
     runner.state["started_at"] = time.perf_counter()
     runner.state["page"] = dict(start, url="https://anywhere.test/")
     act(runner)
@@ -787,7 +793,8 @@ def test_attempt_is_saved_before_input(runner, tmp_path):
         json.loads(runner.trace_path.read_text())["attempt"]
     )
     act(runner)
-    assert seen == [{"step": 1, "action": "Go", "kind": "click", "target": "1", "text": None}]
+    assert seen == [{"step": 1, "action": "Go", "kind": "click", "target": "2", "text": None,
+                     "phase": "prepared", "input_started": False}]
     saved = json.loads(runner.trace_path.read_text())
     assert saved["attempt"] is None and saved["history"][-1]["action"] == "Go"
 
@@ -804,12 +811,17 @@ def test_stop_check_skips_the_text_call_and_the_input(runner, monkeypatch, tmp_p
     runner.trace_path = tmp_path / "run.json"
     helper = Mock(return_value=("book", {"model": "test", "latency_ms": 10}))
     monkeypatch.setattr(loop, "field_text", helper)
-    runner.before_input = Mock(side_effect=[None] * text_calls + [ValueError("stopped")])
+    def stop_at_phase():
+        if text_calls == 0 or helper.called:
+            raise ValueError("stopped")
+
+    runner.before_input = stop_at_phase
     with pytest.raises(ValueError, match="stopped"):
         act(runner, "e1")
     assert helper.call_count == text_calls
     runner.state["browser"].act.assert_not_called()
-    assert runner.state["attempt"] is None and not runner.trace_path.exists()
+    assert runner.state["attempt"] is None
+    assert json.loads(runner.trace_path.read_text())["status"] == "stopped"
 
 
 def test_failed_save_after_input_skips_the_reread(runner, monkeypatch):
@@ -832,7 +844,7 @@ def test_step_is_saved_when_the_reread_fails(runner, tmp_path):
 
 def test_stale_input_clears_the_saved_attempt(runner, monkeypatch, tmp_path):
     runner.trace_path = tmp_path / "run.json"
-    monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+    monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
     runner.state["browser"].act.side_effect = StalePage("changed before input")
     runner.command("tick")
     assert json.loads(runner.trace_path.read_text())["attempt"] is None
@@ -841,7 +853,7 @@ def test_stale_input_clears_the_saved_attempt(runner, monkeypatch, tmp_path):
 def test_run_saves_the_final_state(runner, monkeypatch, tmp_path):
     runner.trace_path = tmp_path / "run.json"
     runner.state["status"] = "ready"
-    monkeypatch.setattr(loop, "choose", lambda *_: decision("DONE"))
+    monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("DONE"))
     list(runner.run())
     saved = json.loads(runner.trace_path.read_text())
     assert saved["status"] == "done" and saved["decisions"][-1]["choice"] == "DONE"
@@ -868,7 +880,7 @@ def test_closing_a_run_early_saves_its_state(runner, monkeypatch, tmp_path):
 
 
 def test_decision_records_omitted_actions(runner, monkeypatch):
-    monkeypatch.setattr(loop, "choose", lambda *_: decision("e3"))
+    monkeypatch.setattr(loop, "choose", lambda *_, **_control: decision("e3"))
     runner.state["page"]["omitted_actions"] = 12
     runner.command("predict")
     assert runner.state["decisions"][-1]["omitted_actions"] == 12

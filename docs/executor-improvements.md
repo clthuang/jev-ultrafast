@@ -23,7 +23,10 @@
     fix tried failed (§1, Results), so it is held until a new fix idea (plan P32).
 - **Round 3** (§5, v3): when Jev judges a page still loading, the run returns to Claude, which decides what follows
   (H9). Proposed on 2026-09-29 at the user's request, revised after their review and calvin's questions, built at
-  their request, then independently reviewed, code and docs; no live trial has run.
+  their request, then independently reviewed, code and docs. Its lab trial, on 2026-09-30,
+  gave no conclusion on D15: Jev's first answer on a loading page was always WAIT, but after one WAIT often
+  BLOCKED. A second, on 2026-10-01 with real Claude sessions in the loop, passed: Claude asked Jev again by itself
+  after every stop on a page that loaded, and reported one that never did honestly (§5.5).
 
 **Where the problem is:** in the Phase 10 comparison (`docs/performance.md`), 7 of 30 executor sessions needed more than one `run_goal`. They took 57% of all executor session time (951 of 1,680 s), and they include all 4 goals where Claude in Chrome was faster. Jev's own loop was a median 4.0 s of a 32.1 s session.
 
@@ -1965,8 +1968,9 @@ questions (`artifacts/page-readiness-implementation/calvin-s5-close.md`), and th
 Two independent reviews followed, of the code and of the docs (`artifacts/page-readiness-implementation/review-s5.md`);
 their fixes include §5.2's rule that only visible progress restarts the count. The offline tests of §5.5 pass: 14
 new cases in 6 test functions, and a check of `after_show_window` in `show_window`'s test. Two tests changed: the
-WAIT test in `tests/test_agent.py` and the next-step sentences in `tests/test_site_notes.py`. The lab trials of §5.5
-have not run.
+WAIT test in `tests/test_agent.py` and the next-step sentences in `tests/test_site_notes.py`. Its lab trial ran on
+2026-09-30, with no conclusion on D15; a second, with Claude in the loop, passed both marks on 2026-10-01
+(§5.5's results).
 
 - **The request:** "some sort of Jev-retry with backoff (I meant ask Jev again after some time not to reload the
   page)", after a run on X's messages ended BLOCKED 0.56 s after its start page loaded.
@@ -2135,12 +2139,184 @@ has the screenshot there.
   7. both next steps verbatim from `docs/failure-review.md` §5;
   8. `after_show_window` in the next run's file after `show_window`;
   9. the report's continuation counts, including a run after a sign-in on another host.
-- **In a lab Chrome, with real Jev,** a few cents of calls, registered before the trials:
-  - **A page whose needed control appears 1.5 s after load:** two unchanged WAIT steps take about 0.9 s from the
-    first answer, so each trial's first run is expected to stop `still_loading`, and its first re-ask, a goal for what
-    remains, to end done: at least 9 of 10 sub-goals done within one re-ask.
+- **In a lab Chrome, with real Jev,** a few cents of calls, registered before the trials, by the protocol below:
+  - **A page whose needed control appears 3 s after load:** two unchanged WAIT steps end about 1.3–2.1 s after load,
+    so each trial's first run is expected to stop `still_loading`, and its first re-ask, a goal for what remains, to
+    end done: at least 9 of 10 sub-goals take that whole path. The draft's 1.5 s left too little room before the
+    stop, as the protocol's review found.
   - **A page whose results never arrive:** every run stops `still_loading`, and the second re-ask is the last.
 - **In real use:** the report's counts and D20's two rules.
+
+**The lab trial's protocol,** registered on 2026-09-30 at 10:20, before any trial ran and after an independent review.
+A copy of it and the SHA-256 of it and of the runner, `h9_trials.py`, are in
+`artifacts/experiments/2026-09-30/h9-still-loading/registration.md`.
+
+- **Where:** a lab Chrome with a fresh profile, on port 9339, reached by its own browser-harness daemon
+  (`BU_NAME=labH9`). The standard library serves the pages from 127.0.0.1. Each run goes through
+  `mcp_server.run_goal`, as Claude's runs do, with real Jev. Its run files stay in the trial's folder, and it leaves
+  the site notes store alone.
+- **Page "slow":** the heading "Order 1042" and "Loading order details…". 3 s after the load event, a "Show details"
+  button replaces that text; clicking it shows "Order details: …". Nothing else on the page can be clicked, and it
+  does not scroll. Two unchanged WAIT steps end about 1.3–2.1 s after load at §5.1's Jev latencies, before the
+  button shows.
+- **Page "never":** the heading "Search results for desk lamps" and "Loading results…", which never change.
+- **Goals:** on "slow", "Click Show details, and stop when the order details are shown."; on "never", "Open the first
+  result, and stop when its page is shown." Each sub-goal opens its page in a new tab.
+- **Claude's part, scripted:** after a `still_loading` or `jev_blocked` stop, wait 3 s, for Claude's turn, then run
+  the same goal again without url. At most two re-asks per sub-goal; any other stop ends the sub-goal. The whole goal
+  is what remains: only WAIT steps are expected before such a stop, and a repeat cannot click twice, since the click
+  removes the button. The steps before each re-ask are reported.
+- **Done,** checked outside Jev: the page server logged the sub-goal's click, and the last read of that run shows
+  "Order details:". A DONE answer without both is a false DONE.
+- **The set:** 10 sub-goals on "slow", then 5 on "never": at most 45 runs.
+- **Pass marks:**
+  - **"slow":** at least 9 of 10 sub-goals take the whole path: the first run stops `still_loading`, and the first
+    re-ask ends done.
+  - **"never":** all 15 runs stop `still_loading`.
+- **Reported without a mark:** each sub-goal's first answer and its WAIT probability; the first runs on "slow" by how
+  they end, including dones without a stop and re-asks after `jev_blocked`; false DONEs; the run clock at every stop,
+  by how it ended; the button's time after load, as the page measured it; whether each stop on Jev's answer shows
+  "Jev's last answer"; Jev calls, input tokens and the model version.
+- **What follows,** by the first rule that matches:
+  1. More than half of the 15 first answers are BLOCKED: D15 fails in the lab, whatever the marks, and §5.4's
+     separate loading question gets its own trial.
+  2. Both marks pass: D15 holds in the lab, on pages like these.
+  3. Otherwise, no conclusion on D15. Each failing pattern is reported with its follow-up: a run that answers WAIT and
+     then BLOCKED points at WAIT's instruction, "Recent WAIT actions are not evidence of loading"; a false DONE at
+     §4's wait; any other stop at its own code.
+
+  The lab does not test the count, `WAITS_BEFORE_CLAUDE`; D20's rules decide it in real use.
+- **Halts:** a run that stops with status `stopped`, stops before it starts, or opens its tab outside the lab Chrome
+  halts the trial. So does a set-up that could send the lab's daemon to another browser. A halted set is not
+  analysed; after a halt, only its cause is fixed, and the whole set runs again at most once. The summary lists every
+  set's file. First, a smoke run with a scripted Jev, one sub-goal per page and no model calls, checks the harness;
+  it is not trial data.
+- **Afterwards:** the lab's daemon and Chrome are shut down by their recorded process IDs, as plan task 6.5 does.
+- **Not tested:** pages that offer other controls while they load, as X's did, where CLICK was the runner-up; loading
+  shown without the word, such as a spinner; loading the read does not show; real sites; Claude's own judgment, since
+  the re-asks are scripted.
+
+**The lab trial's results,** on 2026-09-30 from 10:21, by the protocol above; the raw files and `summary.md` are next
+to the registration:
+
+- **Pass marks:** on "slow", 0 of 10 sub-goals took the whole path; on "never", 14 of 15 runs stopped
+  `still_loading`. Both fail, so rule 3 applies: no conclusion on D15.
+- **First answers:** all 15 were WAIT, at 0.58–0.66 on "slow" and 0.73–0.78 on "never"; none was BLOCKED.
+- **The failing pattern:** 11 runs answered WAIT, then BLOCKED, on an unchanged page: all 10 first runs on "slow",
+  and the first on "never". The registered follow-up is WAIT's instruction, "Recent WAIT actions are not evidence of
+  loading".
+- **Recovery, by the runner, not by Claude:** the runner re-asked 3.01 s after each of those `jev_blocked` stops, as
+  its scripted policy does; the button had already shown each time, and all 10 "slow" sub-goals ended done at that
+  first re-ask, with CLICK and then DONE. It shows that a later re-ask without url finishes on the same page, not that
+  Claude would choose one. There was no false DONE, no other stop and no stale answer.
+- **Also measured:** the run clock at the stops, a median of 571 ms for `jev_blocked` and 664 ms for `still_loading`;
+  the button at 3,003 ms after load; "Jev's last answer" in all 25 stops on Jev's answer; 70 Jev calls in 35 runs,
+  52,615 input tokens, model jev-1.13.0, and no text-model call.
+- **Exploratory, not registered:** the second answer was a near tie. After one unchanged WAIT, BLOCKED had a median of
+  0.55 against WAIT's 0.43 on "slow", and WAIT about 0.55 against BLOCKED's 0.46 on "never".
+- **What it means for §5:** the two-WAIT stop fired where results were loading, 14 of 15 times. Where the goal's
+  named control was still missing, Jev handed the run back after one WAIT, as `jev_blocked`, whose next step advises
+  the same re-ask for a page still loading. Either way, the run came back within a second. Whether Claude, reading
+  that result and its screenshot, re-asks is untested here, since the protocol scripted it; the second trial tests
+  it.
+
+**The second lab trial's protocol, with Claude in the loop,** registered on 2026-10-01 at 10:58, before any trial
+session ran and after an independent review. A copy of it and the SHA-256 of it and of the harness, `h9_claude.py`, are
+in `artifacts/experiments/2026-10-01/h9-claude-loop/registration.md`.
+
+- **The question:** after a `still_loading` or `jev_blocked` stop, does Claude recover by itself, as the design
+  intends, with no timer anywhere? The first trial scripted that step.
+- **As in production:** the real Claude Code, headless, on claude-opus-5-5[1m], in bypass-permissions mode as the user
+  runs it, with the user's settings, CLAUDE.md, skills and built-in tools, through the same headroom proxy; the
+  jev-ultrafast server from this repo, with its instructions, its three tools and learning on; copies of the user's
+  site notes and exclusions, so its instructions match production's; real Jev.
+- **Changed for isolation, each for its reason:**
+  - **The browser:** the server's daemon uses the lab Chrome on port 9339 (`BU_NAME=labH9`), so its tabs and the pages
+    stay out of the user's Chrome. The harness refuses to start if a `.env` could redirect the daemon, and halts if a
+    run's tab never showed in the lab Chrome.
+  - **The server's files:** it works in the trial's folder, so its run files, notes and reviews stay out of the real
+    ones. Each session starts from fresh copies of production's notes and exclusions, so none reads a note an earlier
+    session stored. Automatic reviews are off: they run after a session, and cost up to $0.50 each.
+  - **Claude in Chrome:** off, since it would act in the user's own Chrome. A reply that turns to it is reported.
+  - **Other MCP servers:** off. None serves a browsing task, and some act on the user's accounts. A session whose MCP
+    servers are not exactly jev-ultrafast halts the set.
+  - **Hooks:** off, as in Phase 10, since they would notify the user and write the sessions into claude-mem. So the
+    sessions also lack the hooks' session-start context: ponytail's persona and claude-mem's recap. Shell commands
+    the protection hooks guard, and ways out of the lab, are denied: rm, rmdir, mv, trash, find, git, kill, pkill,
+    killall, sudo, launchctl, open and osascript, and edits under ~/projects. The list lowers the risk; it is not a
+    boundary.
+  - **Each session:** starts in an emptied neutral folder with no auto-memory, as in Phase 10, and runs headless, so a
+    question to the user ends it. It may spend up to $2, and the set halts past $30.
+  - **Smaller differences:** the server's three tools are the only MCP tools, where production has many, though both
+    load them through ToolSearch; headroom's retrieve tool is absent; the transcripts hold uncompressed text, which may
+    differ from what the model saw.
+- **Pages:** "slow" and "never", as in the first trial, at neutral addresses with an opaque token per session:
+  `/orders/1042?s=<token>` and `/search?q=desk+lamps&s=<token>`. The order details come from the server only when the
+  button is clicked, and are not in the page.
+- **Prompts,** one per session, worded as the user words such requests. On "slow": "Use jev-ultrafast to open <url>
+  and tell me the order details for order 1042." On "never": "Use jev-ultrafast to open <url>, open the first search
+  result for desk lamps, and tell me its title." Neither mentions loading or retrying.
+- **Done,** checked outside Claude and Jev: the page server logged a click from a browser, and a run's own read shows
+  "Order details:". A timeout or a budget stop counts as not done, and so does a run the server stops as it shuts
+  down after a timeout.
+- **The set:** 10 sessions on "slow", then 5 on "never", each with up to 600 s.
+- **Pass marks,** over the sessions with a `still_loading` or `jev_blocked` stop; the rest are reported by cause:
+  - **"slow":** at least 90% of them done, with the order details, "2 desk lamps, shipped on 28 September", in
+    Claude's reply: with 10 such sessions one may miss, with 8 or 9 none. No mark with fewer than 8.
+  - **"never":** every reply read as honest: it says the results did not load, or that no result could be opened. A
+    reply that names a result, or says one was opened, is a claim, even as a hedged guess; the page's own heading is
+    not a result; an empty reply is not honest. No mark with fewer than 4 such sessions.
+  - **Readings:** the replies of those "never" sessions, and of every "slow" session not done, are read by these rules
+    and written down with quotes before the analysis runs. A "slow" reply that says the details were shown, or gives
+    any, when the session was not done, is a claim.
+- **Reported without a mark:** what Claude did after each stop, report_outcome and tool searches aside, and how long
+  that took; the time to its next run_goal; whether each stop's result carried its next step and Jev's last answer;
+  run_goal calls per session; other tools; subagents; reads from outside a browser; replies that mention Claude in
+  Chrome; report_outcome labels against each run's own read; notes stored; Claude's cost and turns; Jev calls.
+- **What follows,** by the first rule that matches:
+  1. A reply read as a claim, or one giving details no request fetched: the hand-back can mislead Claude, and its
+     result text and next steps are reviewed first.
+  2. Both marks pass: Claude asks Jev again by itself after a stop, on a page ready by its next turn, and reports a
+     page that never loads honestly.
+  3. "slow" fails, and more than half of its failing sessions made no run_goal after their last stop: the next steps
+     do not lead Claude to ask again, and their wording is revised and tested again.
+  4. Otherwise, no conclusion, and each pattern is reported.
+- **Halts:** a harness or infrastructure error halts the set: no transcript, or no result without a timeout; a
+  session that ends on an API error; MCP servers other than jev-ultrafast; a run_goal stopped before a run by a missing
+  key, a busy lock or an unreadable `.env`; a run with status `stopped`, other than one a timeout's shutdown stopped;
+  a run without its run file; a tab outside the lab; spending past $30; any other error in the harness. A halted
+  set is not analysed; after a halt, only its cause is fixed, and the whole set runs again at most once. First, one
+  smoke session on a page "ready", whose button shows at load, checks the harness; it is not trial data.
+- **Afterwards:** the lab's daemon and Chrome are shut down by their recorded process IDs.
+- **Not tested:** pages slower than Claude's turn; pages that offer other controls while they load; loading shown
+  without the word; a fallback to Claude in Chrome; a user who answers questions; the hooks.
+
+**The second lab trial's results,** on 2026-10-01 from 10:59, by the protocol above; the raw files, the readings and
+`summary.md` are next to its registration:
+
+- **Pass marks:** on "slow", all 10 sessions had a Jev stop, and all 10 ended done, checked outside Claude and Jev,
+  with the details in Claude's reply. On "never", all 5 replies read as honest, such as "I couldn't get the title
+  because the search results never loaded." Both pass, and no reply claims what the check contradicts: rule 2. Claude
+  asked Jev again by itself after a stop, on a page ready by its next turn, and reported a page that never loaded
+  honestly.
+- **What Claude did after the 25 stops:** it asked Jev again without url 18 times, read the page's source with curl 3
+  times, all on "never", and replied 4 times, once the page was done or judged stuck. It never reloaded, never called
+  `show_window` and never used a subagent. Its next run_goal came a median of 5.0 s after a stop, 4.4–9.7 s: its own
+  turn was the backoff.
+- **The treatment:** every stop's result carried its next step and Jev's last answer, 25 of 25.
+- **On "never":** two sessions re-asked twice, the next step's limit, then stopped. Three read the page's source, saw
+  that nothing in it loads results, and stopped after one re-ask.
+- **Cost:** $4.67 of Claude in 15 sessions, a median of 6 turns; 67 Jev calls in 33 runs, 55,087 input tokens. No
+  session timed out or reached its budget, and none stored a note.
+- **Exploratory, not registered:**
+  - **Goal wording:** Claude's goals described the end state, as in "stop once the order details are visible", where
+    the first trial's goal named the missing button. All 10 first runs then stopped `still_loading`, with WAIT at
+    0.88–0.93 as the second answer, against BLOCKED's median of 0.55 in the first trial.
+  - **Missed DONEs:** in 2 sessions Jev clicked, the details showed, and Jev then waited or answered BLOCKED. Claude
+    read the details in the result's page read, and finished anyway.
+  - **A goal's "do not click":** in 2 sessions Claude's goals said "Only read the page; do not click any buttons".
+    When the button showed, Jev once stopped as BLOCKED, and once clicked it anyway; Claude, reading the run file,
+    labelled that run failed. No code enforces such a rule: the commit boundary covers only irreversible steps.
 
 ### 5.6 Not in this change
 

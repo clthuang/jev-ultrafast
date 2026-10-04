@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from jev_ultrafast import Agent
+from jev_ultrafast.contracts import SUPPORTED_OPERATIONS
 from jev_ultrafast.demo import load_environment
 
 GOALS = (
@@ -18,12 +19,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-actions", type=int, default=15)
     parser.add_argument("--goal", default=GOALS)
+    parser.add_argument("--allowed-operations", nargs="*", choices=sorted(SUPPORTED_OPERATIONS), required=True)
     args = parser.parse_args()
     load_environment()
     output = Path("artifacts/dynamic/fixture") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     output.mkdir(parents=True, exist_ok=True)
     print(f"Trace: {output}", flush=True)
-    with Agent("http://127.0.0.1:8766/fixture.html?scenario=travel", args.goal) as agent:
+    with Agent(
+        "http://127.0.0.1:8766/fixture.html?scenario=travel", args.goal,
+        allowed_operations=args.allowed_operations,
+    ) as agent:
         try:
             for state in agent.run():
                 history = state["history"]

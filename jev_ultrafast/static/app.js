@@ -33,9 +33,10 @@ async function call(name, body = {}) {
   return data;
 }
 function controls() {
-  const live = state?.page && !["done", "blocked"].includes(state.status);
+  const live = state?.page && !["done", "blocked", "stopped"].includes(state.status);
   $("start").disabled = busy;
   $("scenario").disabled = busy;
+  $("allowed-operations").disabled = busy;
   $("goal").disabled = busy;
   $("choose").disabled = busy || !live;
   $("execute").disabled = busy || !state?.decision || !live;
@@ -62,7 +63,7 @@ async function perform(fn, label) {
     }
     $("error").textContent = error.message;
     $("error").hidden = false;
-    $("status").textContent = "Paused · needs attention";
+    if (state?.status !== "stopped") $("status").textContent = "Paused · needs attention";
   } finally {
     busy = false;
     controls();
@@ -82,6 +83,7 @@ function render() {
     predicted: "Choice ready · inspect or execute",
     done: "Jev reports complete · inspect the page",
     blocked: "Stopped · no supported next action",
+    stopped: "Stopped · start a new goal to continue",
   };
   $("status").textContent = labels[state.status] || state.status;
   if (!page) {
@@ -114,10 +116,8 @@ function render() {
     const p = probability(e);
     return `<div class="choice ${selectedIndex === e.index ? 'best' : ''}" data-action="${escape(e.index)}"><span class="choice-id">[${escape(e.index)}]</span><div class="choice-label">${escape(e.label)}<small>${escape(e.role)} · ${escape(e.operations.join(' / '))}${e.value ? ' · '+escape(e.value) : ''}${e.checked !== undefined ? ' · checked '+escape(e.checked) : ''}</small>${p >= 0 ? `<div class="bar" style="--probability:${p*100}%"></div>` : ''}</div><span class="probability">${p >= 0 ? percent(p) : '—'}</span></div>`;
   }).join('');
-  const targets = new Map();
-  for (const a of page.actions) if (a.rect && !targets.has(a.node)) targets.set(a.node, a);
-  $("targets").innerHTML = [...targets.values()].map((a,i) => {
-    const index=String(i+1);
+  $("targets").innerHTML = state.elements.filter(e => e.rect).map(a => {
+    const index=a.index;
     return `<div class="target ${index === selectedIndex ? 'selected' : ''}" data-action="${index}" style="left:${100*a.rect.x/page.w}%;top:${100*a.rect.y/page.h}%;width:${100*a.rect.w/page.w}%;height:${100*a.rect.h/page.h}%"><span>${index}</span></div>`;
   }).join('');
   $("targets").hidden = !$("overlays").checked;
@@ -147,7 +147,8 @@ $("task-form").addEventListener("submit", (event) => {
   automatic = false;
   perform(
     () =>
-      call("reset", { scenario: $("scenario").value, goal: $("goal").value }),
+      call("reset", { scenario: $("scenario").value, goal: $("goal").value,
+        allowed_operations: JSON.parse($("allowed-operations").value) }),
     "Opening a fresh browser…",
   );
 });
@@ -177,7 +178,7 @@ $("auto").addEventListener("click", () =>
       } else {
         await call("tick");
       }
-      if (["done", "blocked"].includes(state.status)) break;
+      if (["done", "blocked", "stopped"].includes(state.status)) break;
     }
     automatic = false;
   }, "Running the browser…"),

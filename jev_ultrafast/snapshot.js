@@ -1,6 +1,7 @@
 (() => {
   if (!document.body) return null;
   const cache = window.__jevFast ||= {ids:new WeakMap(), nodes:new Map(), next:1};
+  cache.epoch ||= [...crypto.getRandomValues(new Uint32Array(4))].join('-');
   const identity = e => {
     if (!cache.ids.has(e)) cache.ids.set(e,cache.next++);
     const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
@@ -43,7 +44,8 @@
   };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
-      .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])];
+      .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly,
+        e.tagName==='SELECT' && e.multiple ? [...e.selectedOptions].map(o=>[identity(o),o.label,o.value]) : null])];
   cache.guard=e=>{
     if (!e?.isConnected || !visible(e)) return null;
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
@@ -52,9 +54,12 @@
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
-  const actions=[];
+  const actions=[], evidence=[];
   for (const e of document.querySelectorAll(selector)) {
-    if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
+    if (e.tagName!=='SELECT' && e.closest('select')) continue;
+    if (!safe(e) || !visible(e)) continue;
+    const multiple=e.tagName==='SELECT' && e.multiple;
+    if (!multiple && (e.matches(':disabled') || e.closest('[aria-disabled="true"]'))) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
@@ -66,9 +71,19 @@
     }
     if (['checkbox','radio'].includes(e.type)) base.checked=String(e.checked);
     if (e.tagName==='SELECT') {
-      for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
-        actions.push({...base,kind:'select',value:o.value,
-          current_value:[...e.selectedOptions].map(o=>o.label).join(', '),label:base.label+' → '+o.label});
+      const selected_options=[...e.selectedOptions].map(o=>({label:o.label,value:o.value}));
+      const current_value=selected_options.map(o=>o.label).join(', ');
+      if (multiple) {
+        evidence.push({...base,multiple:true,selected_options,value:current_value});
+        continue;
+      }
+      for (const [observed_index,o] of [...e.options].entries()) {
+        const effective_disabled=e.matches(':disabled') || o.disabled || !!o.closest('optgroup[disabled]');
+        if (!o.selected && !effective_disabled)
+          actions.push({...base,kind:'select',value:o.value,current_value,label:base.label+' → '+o.label,
+            option:{select_id:base.node,option_id:identity(o),observed_index,label:o.label,value:o.value,
+              selected:o.selected,effective_disabled,document_id:performance.timeOrigin,cache_epoch:cache.epoch}});
+      }
     } else {
       const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
         (['textbox','searchbox','spinbutton'].includes(rname) ||
@@ -95,7 +110,7 @@
   // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
   const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
-    document.title,text,semantics,page_key[6]];
+    document.title,text,semantics,evidence.map(({rect,...item})=>item),page_key[6]];
   const omitted_actions=Math.max(0,actions.length-250);
   actions.splice(250);
   actions.forEach((a,i)=>a.id='e'+(i+1));
@@ -103,5 +118,5 @@
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
-    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
+    scroll:{y:scrollY,height},actions,evidence,marker,page_key,guards,omitted_actions};
 })()

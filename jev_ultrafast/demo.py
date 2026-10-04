@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .agent import Agent
+from .contracts import validate_allowed_operations, validate_goal
 from .questions import MAX_STEPS
 
 ROOT = Path(__file__).parent
@@ -46,11 +47,12 @@ def close_browser():
 def command(name, body):
     global AGENT
     if name == "reset":
+        policy = validate_allowed_operations(body.get("allowed_operations"))
         scenario = body.get("scenario", "flights")
         if scenario not in {"travel", "research", "flights"}:
             raise ValueError("Unknown demo scenario")
-        goal = body.get("goal", "").strip()
-        if not goal or len(goal) > 2000:
+        goal = validate_goal(body.get("goal"))
+        if len(goal) > 2000:
             raise ValueError("Enter 1–2,000 characters")
         close_browser()
         AGENT = Agent(
@@ -58,6 +60,7 @@ def command(name, body):
             if scenario == "flights"
             else f"{ORIGIN}/fixture.html?scenario={scenario}",
             goal,
+            allowed_operations=sorted(policy),
             screenshots=True,
             record_dir=Path.cwd() / "artifacts" / "frames" if body.get("record") else None,
         )

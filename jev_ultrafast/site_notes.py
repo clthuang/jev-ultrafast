@@ -8,6 +8,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
+from . import store_io
+
 # Stop texts, copied from the code that writes them.
 STALE_STREAK_STOP = "Three choices in a row went stale while the page read stayed the same:"  # Agent.command
 NAMED_COVER = "Target is covered by <"  # browser_operation's stale message, naming the element over the target
@@ -228,7 +230,9 @@ def possible_false_dones(runs):
 def visited_urls(run):
     """Every URL a run visited (design §6.7): call.url, each decision's page URL, each step's url and page.url."""
     urls = [(run.get("call") or {}).get("url")]
-    urls += [d["request"]["state"]["page"]["url"] for d in run.get("decisions", []) if "request" in d]
+    urls += [d.get("observed_url") for d in run.get("decisions", [])]
+    urls += [((d.get("request") or {}).get("state") or {}).get("page", {}).get("url")
+             for d in run.get("decisions", [])]
     urls += [step.get("url") for step in run.get("history", [])]
     urls.append((run.get("page") or {}).get("url"))
     return [url for url in urls if url]
@@ -415,19 +419,50 @@ def active(note, today):
     return not note["retired"] and today < date.fromisoformat(start) + timedelta(days=days)
 
 
-def read_notes(path):
-    """The notes in the file and None; None and None when it is missing; or no notes and the error that stops them."""
+class NotesStoreError(ValueError):
+    """Malformed notes are infrastructure failure, never a semantic decision refusal."""
+
+
+def validate_envelope(envelope):
+    if not isinstance(envelope, dict) or type(envelope.get("schema_version")) is not int or envelope["schema_version"] != 2:
+        raise NotesStoreError("unsupported notes schema")
+    if not isinstance(envelope.get("notes"), list) or not all(map(well_formed, envelope["notes"])):
+        raise NotesStoreError("a note lacks a field, or has one of the wrong type")
+    if "pending_review" not in envelope:
+        raise NotesStoreError("missing pending review field")
+    receipt = envelope["pending_review"]
+    if receipt is not None:
+        from . import review_records
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("digest"), dict):
+            raise NotesStoreError("malformed pending review receipt")
+        digest = review_records.validate(receipt["digest"], "digest")
+        if receipt.get("batch_id") != digest["batch_id"] or receipt.get("reply_sha256") != digest["reply_sha256"]:
+            raise NotesStoreError("pending receipt identity mismatch")
+    return envelope
+
+
+def read_envelope(path):
     try:
-        notes = json.loads(Path(path).read_text())
+        value = json.loads(Path(path).read_text())
     except FileNotFoundError:
-        return None, None
+        return None
     except (OSError, ValueError) as error:
-        return [], f"cannot read the notes file {path}: {error}"
-    if not isinstance(notes, list):
-        return [], f"cannot read the notes file {path}: not a list of notes"
-    if not all(map(well_formed, notes)):
-        return [], f"cannot read the notes file {path}: a note lacks a field, or has one of the wrong type"
-    return notes, None
+        raise NotesStoreError(f"cannot read the notes file {path}: {error}") from error
+    if isinstance(value, list):
+        value = {"schema_version": 2, "notes": value, "pending_review": None}
+    try:
+        return validate_envelope(value)
+    except ValueError as error:
+        raise NotesStoreError(f"cannot read the notes file {path}: {error}") from error
+
+
+def read_notes(path):
+    """Public list reader accepts legacy lists and the transaction envelope."""
+    try:
+        envelope = read_envelope(path)
+        return (None if envelope is None else envelope["notes"]), None
+    except NotesStoreError as error:
+        return [], str(error)
 
 
 def is_date(value):
@@ -471,57 +506,50 @@ def load(path=NOTES_PATH, create=True):
         return [], str(error)
 
 
-def update(change, path=NOTES_PATH):
-    """The one writer of the notes file: takes its lock, loads the notes, applies change, and replaces it atomically.
-
-    change(notes) edits the list in place and returns update's result, or raises ValueError to write nothing. update
-    raises ValueError, writing nothing, while the file cannot be read (P8), or when change leaves a note that could not
-    be read back; a missing file starts from SEEDS (P7)."""
-    path = Path(path)
+def transaction(change, path=NOTES_PATH, *, write=True):
+    """One notes lock around a private envelope; callbacks use only pure helpers."""
+    path = Path(path).parent.resolve() / Path(path).name
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Several sessions' servers write this one file (design §6.6). Closing the lock file releases the lock.
     with open(path.with_suffix(".lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        notes, error = read_notes(path)
-        if error:
-            raise ValueError(error)
-        if notes is None:
-            notes = json.loads(json.dumps(SEEDS))  # a copy, so SEEDS never change
-        result = change(notes)
-        if not all(map(well_formed, notes)):  # such a file would show no notes until fixed by hand (P8)
-            raise ValueError("a note would lack the fields or the types a note needs; nothing was written")
-        temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(json.dumps(notes, indent=2) + "\n")
-        os.replace(temporary, path)
-    return result
+        envelope = read_envelope(path)
+        if envelope is None:
+            envelope = {"schema_version": 2, "notes": json.loads(json.dumps(SEEDS)), "pending_review": None}
+        result = change(envelope)
+        validate_envelope(envelope)
+        if write:
+            store_io.publish(path, envelope)
+        return result
+
+
+def update(change, path=NOTES_PATH):
+    """List-facing writer preserves every envelope field, including pending receipt."""
+    return transaction(lambda envelope: change(envelope["notes"]), path)
 
 
 # Delegated decision P9 (docs/failure-review-plan.md): a new note on a site whose 5 notes are all approved is refused,
 # with the reason in the reply.
-def add_note(note, path=NOTES_PATH):
-    """Stores a checked note, unapproved whoever wrote it, and returns its ID; raises ValueError when it is refused.
-
-    note gives WRITER_FIELDS. A site keeps at most MAX_NOTES_PER_SITE notes in use: a new one retires the oldest
-    unapproved one, which stays in the file, marked like every retired note."""
+def add_note_to(notes, note):
+    """Pure helper: reserve an ID and site capacity on this transaction's list."""
     today = date.today()
+    on_site = [n for n in notes if n["site"] == note["site"]]
+    in_use = [n for n in on_site if active(n, today)]
+    if len(in_use) >= MAX_NOTES_PER_SITE:
+        unapproved = [n for n in in_use if not n["approved"]]
+        if not unapproved:
+            raise ValueError(f"{note['site']} already has {MAX_NOTES_PER_SITE} approved notes")
+        min(unapproved, key=lambda n: n["created"])["retired"] = today.isoformat()
+    ids, number = {n["id"] for n in notes}, len(on_site) + 1
+    while f"{note['site']}-{number}" in ids:
+        number += 1
+    stored = {"id": f"{note['site']}-{number}", **{field: note[field] for field in WRITER_FIELDS}, "approved": None,
+              "created": today.isoformat(), "shown": 0, "last_shown": None, "failed_after": 0, "retired": None}
+    notes.append(stored)
+    return stored["id"]
 
-    def change(notes):
-        on_site = [n for n in notes if n["site"] == note["site"]]
-        in_use = [n for n in on_site if active(n, today)]
-        if len(in_use) >= MAX_NOTES_PER_SITE:
-            unapproved = [n for n in in_use if not n["approved"]]
-            if not unapproved:
-                raise ValueError(f"{note['site']} already has {MAX_NOTES_PER_SITE} approved notes")
-            min(unapproved, key=lambda n: n["created"])["retired"] = today.isoformat()
-        ids, number = {n["id"] for n in notes}, len(on_site) + 1
-        while f"{note['site']}-{number}" in ids:
-            number += 1
-        stored = {"id": f"{note['site']}-{number}", **{field: note[field] for field in WRITER_FIELDS}, "approved": None,
-                  "created": today.isoformat(), "shown": 0, "last_shown": None, "failed_after": 0, "retired": None}
-        notes.append(stored)  # update() refuses it if a field has the wrong type
-        return stored["id"]
 
-    return update(change, path)
+def add_note(note, path=NOTES_PATH):
+    return update(lambda notes: add_note_to(notes, note), path)
 
 
 def record_shown(ids, path=NOTES_PATH):
@@ -705,9 +733,7 @@ def write_review_state(state, path=REVIEW_STATE):
     """Replaces the review state atomically. Only scripts/review_runs.py calls it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(state, indent=2) + "\n")
-    os.replace(temporary, path)
+    store_io.publish(path, state)
 
 
 def review_due(state, now):

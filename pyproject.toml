@@ -26,3 +26,5 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["native: real local browser checks requiring a verified --lab-manifest"]
+addopts = "-m 'not native'"

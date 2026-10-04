@@ -112,6 +112,22 @@ def test_report_counts_false_and_missed_done(tmp_path, capsys):
         assert expected in everything
 
 
+def test_report_labels_legacy_policy_without_guessing_permissions(tmp_path, capsys):
+    legacy = write_run(tmp_path, 1, goal="Never click or type", call={"allowed_operations": ["CLICK"]})
+    read_only = write_run(tmp_path, 2, allowed_operations=[])
+    explicit = write_run(tmp_path, 3, allowed_operations=["WAIT", "TYPE_TEXT"])
+    before = {path: path.read_bytes() for path in tmp_path.glob("*.json")}
+    output = report(capsys, tmp_path)
+    assert "legacy: policy not recorded 1" in output[0]
+    assert "[] (observation only) 1" in output[0]
+    assert "TYPE_TEXT, WAIT 1" in output[0]
+    assert report_runs.facts(json.loads((tmp_path / f"{legacy}.json").read_text()))["policy"] == (
+        "legacy: policy not recorded"
+    )
+    assert read_only != explicit
+    assert {path: path.read_bytes() for path in tmp_path.glob("*.json")} == before
+
+
 def test_report_checks_flights_runs_with_verify(tmp_path, capsys):
     flights_goal = goal_for(date(2026, 9, 20))
     write_run(tmp_path, 1, labels=[("claude", True)], goal=flights_goal, page=flights_page("London"))
@@ -342,7 +358,7 @@ def test_report_lists_reviews_their_decisions_and_cost(tmp_path, capsys):
         f"</reviewer text from page content {nonce}>",
     ]
     # The unreadable digest is the one file skipped: state.json is never read as a digest.
-    assert output.err.count("skipped") == 1 and f"skipped {unreadable}: JSONDecodeError" in output.err
+    assert output.err.count("skipped") == 1 and f"skipped {unreadable}: invalid review record" in output.err
 
 
 def test_report_prints_reviewer_text_only_inside_a_marked_block(tmp_path, capsys, monkeypatch):
@@ -429,3 +445,90 @@ def test_report_counts_same_tab_runs_after_a_jev_stop(tmp_path, capsys):
         "same-tab runs after a Jev stop: after jev_blocked 1 (0 done), after show_window 1 (1 done), "
         "after still_loading 1 (1 done)"
     ) in lines
+
+
+import pytest  # noqa: E402
+from jev_ultrafast import review_records  # noqa: E402
+from jev_ultrafast.store_io import canonical_bytes  # noqa: E402
+import hashlib  # noqa: E402
+import time  # noqa: E402
+
+
+def v2_record(identifier, created='2026-10-03T10:00:00', cost=0.1, attempt_id=None):
+    return {'schema_version': 2, 'status': 'committed', 'batch_id': identifier,
+            'created_at': created, 'finished_at': created, 'reply_sha256': 'a' * 64, 'input_items': [],
+            'acknowledged': {'runs': {}, 'notes': {}}, 'sent_text': '', 'sent_sha256': hashlib.sha256(b'').hexdigest(),
+            'decisions': [], 'flags': [], 'proposals': [], 'summary': 'Reviewed', 'cost': cost,
+            'attempt_id': attempt_id}
+
+
+def attempt_record(identifier, *, status='running', cost=None, deadline=None):
+    return {'schema_version': 1, 'attempt_id': identifier, 'batch_id': None, 'kind': 'preflight', 'status': status,
+            'created_at': '2026-10-03T10:00:00', 'started_at': 0,
+            'deadline': time.time() + 900 if deadline is None else deadline, 'finished_at': None,
+            'child': None, 'cost': cost, 'sent_text': '', 'sent_sha256': hashlib.sha256(b'').hexdigest(),
+            'input_items': [], 'budget_usd': 0.05}
+
+
+def store_review(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(canonical_bytes(record))
+
+
+def test_mixed_legacy_and_v2_reporting(tmp_path):
+    store_review(tmp_path / '20260927-100000.json', {'decisions': [], 'flags': [], 'proposals': [], 'cost': 0.2})
+    store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32))
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert 'reviews: 2, 0 failed, cost $0.3000' in text
+    assert review_records.acknowledged(tmp_path) == {'runs': {}, 'notes': {}}
+
+
+def test_running_attempt_is_not_failed(tmp_path):
+    path = tmp_path / 'attempts' / ('a' * 32 + '.json')
+    store_review(path, attempt_record('a' * 32))
+    before = path.read_bytes()
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert f'{path}: running' in text and '1, 0 failed, cost unknown' in text
+    assert path.read_bytes() == before
+
+
+def test_random_filenames_do_not_choose_latest(tmp_path):
+    older = v2_record('f' * 32, created='2026-10-03T15:00:00+08:00')
+    newer = v2_record('0' * 32, created='2026-10-03T08:00:00+00:00')
+    for record in (older, newer):
+        record['proposals'] = [{'hypothesis': record['batch_id'], 'evidence_runs': [], 'mechanism': '',
+                                'test': '', 'pass_bar': ''}]
+        store_review(tmp_path / (record['batch_id'] + '.json'), record)
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert f"proposals from {tmp_path / ('0' * 32 + '.json')}" in text
+    assert f"proposals from {tmp_path / ('f' * 32 + '.json')}" not in text
+
+
+@pytest.mark.parametrize('digest_cost,duplicate', [(0.125, False), (None, False), (0.125, True)])
+def test_attempt_and_digest_do_not_double_count_cost(tmp_path, digest_cost, duplicate):
+    attempt_id = 'b' * 32
+    store_review(tmp_path / 'attempts' / (attempt_id + '.json'),
+                 attempt_record(attempt_id, status='succeeded', cost=0.125))
+    store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32, cost=digest_cost, attempt_id=attempt_id))
+    if duplicate:
+        store_review(tmp_path / ('c' * 32 + '.json'), v2_record('c' * 32, cost=0.125, attempt_id=attempt_id))
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert 'reviews: 1, 0 failed, cost $0.1250' in text
+
+
+def test_expired_attempt_is_not_reported_running(tmp_path):
+    path = tmp_path / 'attempts' / ('a' * 32 + '.json')
+    store_review(path, attempt_record('a' * 32, deadline=1))
+    before = path.read_bytes()
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert f'{path}: uncertain' in text and f'{path}: running' not in text
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('broken', [{'decisions': [None]}, {'cost': float('nan')}, {'cost': -1}, {'cost': True}])
+def test_malformed_history_does_not_hide_valid_reports(tmp_path, capsys, broken):
+    (tmp_path / '20260927-100000.json').write_text(json.dumps(broken))
+    store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32))
+    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    assert 'reviews: 1, 0 failed, cost $0.1000' in text
+    assert 'invalid review record' in capsys.readouterr().err
