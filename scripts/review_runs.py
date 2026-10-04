@@ -707,8 +707,9 @@ def unapproved(notes, note_id):
     note = next((note for note in notes if note["id"] == note_id), None)
     if note is None:
         # The whole ID passed the value check; a clipped one could end a longer word right after a value, so a long
-        # ID is not repeated.
-        raise DecisionRefused(f"no note {note_id}" if len(note_id) <= LABEL_CHARACTERS else
+        # ID is not repeated. Its whitespace is folded, so a line break in the reply can never forge an output line.
+        shown = " ".join(str(note_id).split())
+        raise DecisionRefused(f"no note {shown}" if len(shown) <= LABEL_CHARACTERS else
                               f"no note with that ID, which is over {LABEL_CHARACTERS} characters")
     if note["approved"]:
         raise DecisionRefused(

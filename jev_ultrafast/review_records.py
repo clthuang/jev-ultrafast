@@ -328,6 +328,8 @@ def report_records(reviews):
                     raise RecordError('Unsupported historical digest')
                 record = {**record, 'created_at': datetime.strptime(path.stem, '%Y%m%d-%H%M%S').isoformat(),
                           'status': 'failed' if 'failure' in record else 'committed', 'legacy': True}
+                if not valid_time(record['created_at']):
+                    raise RecordError('Historical digest time out of range')
             else:
                 continue
             records.append((path, record))

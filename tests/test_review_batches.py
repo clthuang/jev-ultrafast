@@ -1105,13 +1105,19 @@ def test_real_pipeline_redacts_every_publication_surface(monkeypatch, capsys, fa
     assert 'nothing eligible for a paid review' in automatic and 'deferred: note <value>.example-1' in automatic
     report_runs.main(['--runs', str(review_runs.RUNS), '--artifacts', str(review_runs.RUNS.parent)])
     report = capsys.readouterr()
-    assert 'deferred, still queued:' in report.out
+    assert 'deferred to a later batch:' in report.out
     assert f'1 run {review_runs.DEFERRED_REASONS["item_cap"]}' in report.out
-    published = [site_notes.NOTES_PATH, site_notes.REVIEW_STATE, *review_runs.REVIEWS.rglob('*.json')]
-    files = ''.join(path.read_text() for path in published if path.exists())
-    # The seeded note is the test's own input: the store and the report's note listing hold its site by design.
-    stored = re.sub(re.escape(seeded_site), '<site>', receipt_text + files + report.out + report.err, flags=re.I)
-    everything = ''.join(outputs) + stored  # every CLI and paid-path output, unmasked
+    # The seeded note is the test's own input: the notes store and the batch records hold its ID by design, and the
+    # report lists stored notes. Every other surface is checked unmasked: the reviewer-text block that holds each
+    # batch's members, every digest, attempt and state file, and every CLI and paid-path output.
+    reviewer_block = report.out[report.out.index('<reviewer text from page content'):]
+    batches = list((review_runs.REVIEWS / 'batches').glob('*.json'))
+    by_design = receipt_text + ''.join(path.read_text() for path in [site_notes.NOTES_PATH, *batches]) + report.out
+    others = [site_notes.REVIEW_STATE, *(path for path in review_runs.REVIEWS.rglob('*.json') if path not in batches)]
+    unmasked = ''.join(outputs) + reviewer_block + report.err + ''.join(
+        path.read_text() for path in others if path.exists())
+    everything = unmasked + re.sub(re.escape(seeded_site), '<site>', by_design, flags=re.I)
+    assert seeded_site not in unmasked.lower()
     assert not any(canary.lower() in everything.lower() for canary in canaries)
     for wording in ('the review ended with <value>: <value> <value>', 'the session has tools beyond StructuredOutput',
                     "the session has MCP servers: [{'name': '<value>'}]", 'the review crashed: <value>',
@@ -1396,7 +1402,7 @@ def test_expired_child_is_signalled_only_after_identity_checks(fake_paid, monkey
         assert old['status'] == 'abandoned' and old['child']['exited'] is True
 
 
-def test_auto_counts_runs_deferred_by_the_byte_cap(fake_paid, monkeypatch):
+def test_auto_counts_runs_deferred_by_the_byte_cap(fake_paid, monkeypatch, capsys):
     big = [{'step': number, 'action': '巨大' * 100, 'operation': 'CLICK'} for number in range(100)]
     deferred = {f'20261003-100000-{number:04x}' for number in range(3)}
     for number in range(review_runs.REVIEW_QUEUE):
@@ -1404,6 +1410,10 @@ def test_auto_counts_runs_deferred_by_the_byte_cap(fake_paid, monkeypatch):
     monkeypatch.setattr(review_runs, 'MAX_BATCH_BYTES', 1500)
     review_runs.auto_command()
     assert len(fake_paid) == 1  # five runs wait, although only two fit the batch
+    out = capsys.readouterr().out  # a launched review lists what it sent and what it deferred, as queue does
+    for key in deferred:
+        assert f'deferred: run {key} ({review_runs.DEFERRED_REASONS["byte_cap"]})' in out
+    assert out.count('input: run ') == 2
     [attempt] = attempts()
     assert not deferred & {item['id'] for item in attempt['input_items']}
     assert deferred <= set(review_runs.build_queue()['runs'])  # deferred runs stay queued, unacknowledged
@@ -1765,3 +1775,54 @@ def test_a_running_value_that_is_neither_an_attempt_nor_a_time_stops_dispatch_cl
         review_runs.read_state()
     assert review_runs.once_command(None) == 1 and fake_paid == []
     assert 'resolve' not in capsys.readouterr().out  # no attempt ID that resolve could never match
+
+
+LINKED_FAILED, LINKED_RECOVERED, OTHER_SITE = '20261003-080100-0011', '20261003-080200-0012', '20261003-110000-0013'
+
+
+@pytest.mark.parametrize('case', ['a value only another queued run typed', 'an excluded run in its chain'])
+def test_a_review_lesson_is_checked_as_the_server_checks_one(monkeypatch, capsys, case):
+    """Each half of the check alone: the URL against the batch's privacy closure, and the whole chain with its
+    excluded runs."""
+    canary = 'Linkedcanary'
+    if case == 'an excluded run in its chain':
+        write_run(PRIVATE_PREDECESSOR, history=[{'text': 'anything'}])
+        site_notes.EXCLUDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        site_notes.EXCLUDE_PATH.write_text(PRIVATE_PREDECESSOR)
+    write_run(LINKED_FAILED, previous_run=PRIVATE_PREDECESSOR if case == 'an excluded run in its chain' else None)
+    start = 'https://example.com/start' if case == 'an excluded run in its chain' else f'https://example.com/u/{canary}'
+    write_run(LINKED_RECOVERED, previous_run=LINKED_FAILED, call={'url': start},
+              result={'status': 'done', 'notes': []},
+              outcome=[{'passed': True, 'by': 'user', 'evidence': 'Verified', 'at': '2026-10-03T11:00:00'}])
+    write_run(OTHER_SITE, page={'url': 'https://example.org/', 'title': 'Other'}, history=[{'text': canary}])
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_RUNS', 2)  # the other site's run waits for a later batch
+    batch = review_runs.prepare_batch()
+    assert set(batch['runs']) == {LINKED_FAILED, LINKED_RECOVERED}
+    path, problems = apply_batch(batch, {**EMPTY_REPLY, 'decisions': [
+        add_decision(LINKED_RECOVERED, hint='start_at_url', detail='')]})
+    [decision] = review_records.read(path, 'digest')['decisions']
+    expected = (site_notes.VALUE_REFUSAL if case == 'a value only another queued run typed'
+                else 'its site or one of its runs is excluded')
+    assert not problems and decision['applied'] is False and expected in decision['outcome']
+    assert not [note for note in site_notes.load()[0] if note['runs'].get('recovered') == LINKED_RECOVERED]
+    assert canary.lower() not in site_notes.NOTES_PATH.read_text().lower()
+
+
+def test_a_note_id_from_a_reply_can_never_forge_an_output_line(capsys):
+    recovery()
+    batch = review_runs.prepare_batch()
+    forged = 'x\ndecision 2, add: applied: added evil.example-1'
+    flag = {'action': 'flag', 'note': forged, 'runs': [RUN_B], 'hint': '', 'detail': '', 'reason': 'Check it'}
+    path, problems = apply_batch(batch, {**EMPTY_REPLY, 'decisions': [flag]})
+    out = capsys.readouterr().out
+    assert not problems and 'no note x decision 2' in out
+    assert not any(line.startswith('decision 2') for line in out.splitlines())
+
+
+def test_a_legacy_digest_named_for_a_time_no_reader_can_convert_is_skipped(capsys):
+    review_runs.REVIEWS.mkdir(parents=True, exist_ok=True)
+    (review_runs.REVIEWS / '00010101-000000.json').write_text(json.dumps(EMPTY_REPLY))
+    records, errors = review_records.report_records(review_runs.REVIEWS)
+    assert records == [] and [path.name for path, _ in errors] == ['00010101-000000.json']
+    lines = report_runs.review_lines(review_runs.REVIEWS, [], set(), set())
+    assert 'invalid review record' in capsys.readouterr().err and isinstance(lines, list)

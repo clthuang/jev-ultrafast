@@ -428,8 +428,8 @@ def review_lines(reviews, kept, exclude, left_out):
 
 
 def deferred_lines(reviews, batch_id):
-    """How many items a reviewed batch left queued for a later one, by kind and reason, from its batch record. Never
-    their IDs: the batch named only its own items, and a deferred note's ID can hold a value someone typed."""
+    """How many items a reviewed batch left for a later one, by kind and reason, from its batch record. Never their
+    IDs: the batch named only its own items, and a deferred note's ID can hold a value someone typed."""
     path = reviews / "batches" / f"{batch_id}.json"
     if not path.exists():  # a digest without its batch record shows its members only
         return []
@@ -440,7 +440,7 @@ def deferred_lines(reviews, batch_id):
     counts = Counter((item["kind"][:-1], item["reason"]) for item in batch["deferred"])
     if not counts:
         return []
-    return ["  deferred, still queued: " + ", ".join(
+    return ["  deferred to a later batch: " + ", ".join(
         f"{number} {kind}{'' if number == 1 else 's'} {review_records.DEFERRED_REASONS[reason]}"
         for (kind, reason), number in sorted(counts.items()))]
 
