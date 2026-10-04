@@ -24,7 +24,7 @@ from mcp.server.mcpserver import Image
 
 from . import run_store, site_notes
 from .agent import Agent
-from .browser import UncertainAction
+from .browser import SnapshotTooLarge, UncertainAction
 from .contracts import RunStopped, token_usage, validate_allowed_operations, validate_goal
 from .demo import load_environment
 from .model import action_space
@@ -176,7 +176,9 @@ def start_run(goal, url, allowed_operations, allowed_sites, allow_commit, foregr
     WINDOW_SHOWN = False
     notes = []
 
-    def check_stop():  # Agent owns execution timing; this adapter owns cancellation and shutdown.
+    # Agent owns execution timing; this adapter owns cancellation and shutdown. It runs between steps, before each
+    # text call, input and repeated read, and while waiting for loading.
+    def check_stop():
         anyio.from_thread.check_cancelled()  # raises when the MCP call is cancelled
         if STOP.is_set():
             raise RunStopped("shutdown", "the server is shutting down")
@@ -243,10 +245,18 @@ def finish(agent, run_id, notes):
         return remaining
 
     try:
-        page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False,
+        page = agent.browser.observe(screenshot=True, max_attempts=1, settle_input=False, track=False,
                                      check_stop=final_remaining, remaining_budget=final_remaining)
         image = base64.b64decode(page.pop("screenshot"))
         state["page"] = page  # the run file ends with the final page
+    except SnapshotTooLarge as error:
+        image = None  # the last page read stays only as a diagnostic, marked not fresh
+        notes.append(f"fresh read failed: {error}")
+        if state["status"] == "done":  # a DONE the final read cannot verify is not reported as done
+            elapsed = state["elapsed_ms"]  # the final read stays outside the run's time
+            state["snapshot_overflow"] = error.details
+            agent.mark_stopped("snapshot_too_large")
+            state["elapsed_ms"] = elapsed
     except Exception as error:
         image = None  # the result falls back to the last page read, marked not fresh
         notes.append(f"fresh read failed: {error}")
@@ -550,9 +560,9 @@ def close_browser():
 
 
 def shut_down(*_signal):
-    STOP.set()  # this server's run stops between steps and before each input, and saves
-    # ponytail: a first page load longer than SHUTDOWN_WAIT_SECONDS can leave its tab open;
-    # closing orphaned tabs at startup (design §10) is the upgrade if that happens.
+    STOP.set()  # this server's run stops between steps, before each input or repeated read and in a loading wait
+    # ponytail: a first page load, or a busy page's reads, longer than SHUTDOWN_WAIT_SECONDS can leave its tab open
+    # and the stop unsaved; closing orphaned tabs at startup (design §10) is the upgrade if that happens.
     IDLE.wait(SHUTDOWN_WAIT_SECONDS)
     close_browser()
     os._exit(0)  # a normal interpreter exit would wait forever on mcp's stdin reader thread

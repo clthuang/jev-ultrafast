@@ -13,6 +13,7 @@ from browser_harness.helpers import drain_events
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from examples.flights import FLIGHT_OPERATIONS, GOALS, URL, verify  # noqa: E402
 from jev_ultrafast import Agent  # noqa: E402
+from jev_ultrafast.browser import SnapshotTooLarge  # noqa: E402
 
 folder = Path(sys.argv[1] if len(sys.argv) > 1 else "artifacts/flights/recorded")
 folder.mkdir(parents=True, exist_ok=False)
@@ -63,8 +64,12 @@ finally:
     worker.join(timeout=3)
     agent.browser.call("Page.stopScreencast")
     state = agent.snapshot()
-    state["final_page"] = agent.browser.observe(screenshot=False)
-    state["verification"] = verify(state["final_page"])
+    try:
+        state["final_page"] = agent.browser.observe(screenshot=False)
+        state["verification"] = verify(state["final_page"])
+    except SnapshotTooLarge as overflow:  # an unreadable final page is unverified, never a pass
+        state["final_page"] = None
+        state["verification"] = {"passed": False, "unverified": overflow.code, "details": overflow.details}
     state["source_hashes"] = source_hashes
     state["recording_errors"] = errors
     (folder / "state.json").write_text(json.dumps(state, indent=2))

@@ -135,8 +135,9 @@ Seventeen headless Claude Code sessions (`claude -p`, Opus 5.5) each delegated o
 **Runs and labels:**
 
 - **Jev's first run succeeded in 25 of 30 sessions.**
-- **The 48 runs:** 37 ended done, 10 blocked and 1 stopped. The stopped one reached its goal, then its page read timed out waiting 5 s for the browser daemon, so it was a missed DONE.
+- **The 48 runs:** 37 ended done, 10 blocked and 1 stopped. The stopped one reached its goal, then its page read timed out waiting 5 s for the browser daemon, so it was a missed DONE. Changed after the comparison: a read that times out after a step is now repeated up to 2 times (`docs/executor-improvements.md` §2). That is verified on a synthetic 7 s busy page; whether it would have saved this run is unknown.
 - **Claude's labels matched every run:** no Jev false DONEs, and no blocked run labeled passed.
+- **Changed after the comparison: a final answer waits for loading** (`docs/executor-improvements.md` §4), where that wait is on: with an explicit browser endpoint, or `JEV_LOADING_GATE=1` for your own Chrome. Its cost both ways, from H8c's trials: a median of 0 ms over 25 replayed final answers, 1 of them capped at 5 s; and, where results were still loading, a median of 691 ms per trial on Google Flights, in place of a false DONE and its follow-up run. The comparison above did not include it, and its live-site acceptance has not been re-run on the built code.
 - **1Password slowed both arms:** a Claude in Chrome session (Nominatim) also saved a memory that an autofill extension had blocked its typing.
 
 **Deviations, disclosed:**

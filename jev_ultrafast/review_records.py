@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from . import site_notes
@@ -17,7 +17,8 @@ ID = re.compile(r'[0-9a-f]{32}')
 HASH = re.compile(r'[0-9a-f]{64}')
 RUN_ID = re.compile(r'\d{8}-\d{6}-[0-9a-f]{4}')
 LEGACY_DIGEST = re.compile(r'\d{8}-\d{6}')
-ATTEMPT_STATES = {'claimed', 'spawning', 'running', 'succeeded', 'failed', 'superseded', 'uncertain', 'abandoned'}
+ATTEMPT_STATES = {'claimed', 'spawning', 'running', 'returned', 'succeeded', 'failed', 'superseded',
+                  'uncertain', 'abandoned'}
 
 
 class RecordError(ValueError):
@@ -112,15 +113,16 @@ def run_versions(runs, reasons, recoveries):
 
 
 def valid_time(value):
+    """An ISO time that timestamp() can read: a stored time every reader sorts by."""
     try:
-        return isinstance(value, str) and bool(datetime.fromisoformat(value))
-    except ValueError:
+        return isinstance(value, str) and math.isfinite(timestamp(value))
+    except (ValueError, OverflowError, OSError):  # year 1 read as local time falls before year 1
         return False
 
 
 def timestamp(value):
-    parsed = datetime.fromisoformat(value)
-    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    """Seconds since the epoch. A stored time without a zone was written as local time, so it is read as local."""
+    return datetime.fromisoformat(value).timestamp()
 
 
 def valid_cost(value):
@@ -150,6 +152,10 @@ def item_maps(items):
             raise RecordError("Duplicate or invalid input item")
         mappings[kind][key] = item["version"]
     return mappings
+
+
+# Why a prepared batch left an item for a later one; batch records and every report use these words.
+DEFERRED_REASONS = {"item_cap": "over the batch's item limit", "byte_cap": "over the batch's byte limit"}
 
 
 def text_fields(value, names):
@@ -230,6 +236,9 @@ def validate(record, kind):
                     or not isinstance(relation.get('successors'), list)
                     or not all(isinstance(value, str) and RUN_ID.fullmatch(value) for value in relation['successors'])):
                 raise RecordError('Malformed dependency parent/successors')
+        since = record.get('since')
+        if since is not None and (not isinstance(since, str) or not re.fullmatch(r'\d{8}', since)):
+            raise RecordError('Malformed batch window')
         if (not isinstance(record.get('deferred'), list)
                 or any(not isinstance(item, dict) or item.get('kind') not in {'runs', 'notes'}
                        or not string(item.get('id')) or item.get('reason') not in {'item_cap', 'byte_cap'}
@@ -261,6 +270,7 @@ def validate(record, kind):
                 or record['finished_at'] is not None and not valid_time(record['finished_at'])
                 or record.get('batch_id') is not None and not ID.fullmatch(str(record['batch_id']))
                 or record.get('budget_usd') != (0.05 if record['kind'] == 'preflight' else 0.5)
+                or record.get('error') is not None and not isinstance(record['error'], str)
                 or not isinstance(record.get('sent_text'), str)
                 or record.get('sent_sha256') != hashlib.sha256(record['sent_text'].encode('utf-8')).hexdigest()):
             raise RecordError('Malformed review attempt')
@@ -318,6 +328,8 @@ def report_records(reviews):
                     raise RecordError('Unsupported historical digest')
                 record = {**record, 'created_at': datetime.strptime(path.stem, '%Y%m%d-%H%M%S').isoformat(),
                           'status': 'failed' if 'failure' in record else 'committed', 'legacy': True}
+                if not valid_time(record['created_at']):
+                    raise RecordError('Historical digest time out of range')
             else:
                 continue
             records.append((path, record))

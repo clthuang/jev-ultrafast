@@ -1,6 +1,8 @@
 # Implementation plan: robustness and efficiency
 
-Status: ready for implementation. Plan revision 2, 2026-10-03; all implementation tasks and gates are not started.
+Status: in implementation. Plan revision 2, 2026-10-03. Each task's state, evidence and the cloud execution notes are in
+[robustness-efficiency/status.md](robustness-efficiency/status.md); the per-task "Not started" wording below is the
+plan's starting state.
 
 Source: [reviewed design, revision 3](robustness-efficiency-proposal.md) and its
 [review/validation/premortem](robustness-efficiency-review.md).
@@ -110,6 +112,7 @@ Use a structured execution stop (`RunStopped`, compatible with existing ValueErr
 | `execution_deadline` | `stopped` | No new work/gesture; only the paired release above may finish; late DONE cannot override it |
 | `stale_recovery_limit` | `stopped` | Preserve stale reason/count; no next recovery read |
 | `snapshot_too_large` | `stopped` | No stale fallback; old page diagnostic only, marked not fresh |
+| `event_connection_lost` | `stopped` | The loading wait's own connection failed or closed: never a quiet page, never a reconnect inside the run; a step that ran stays recorded |
 
 Keep cancellation/shutdown and uncertain-input paths distinguishable; preserve original exceptions where the MCP
 transport requires propagation. Terminal states are `done`, `blocked`, `stopped`; direct commands cannot resume any

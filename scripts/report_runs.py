@@ -138,8 +138,13 @@ def facts(run):
         "totals": {
             **{name: any(marker in note for note in result.get("notes", [])) for name, marker in STOP_NOTES.items()},
             "runs with omitted actions": any(d["omitted_actions"] > 0 for d in decisions),
+            "snapshot overflow stops": run.get("stop_code") == "snapshot_too_large",
             "site changes": len(hosts) > 1,
             "stale decisions": run["stale_decisions"],
+            "repeated reads": run.get("repeated_reads", 0),
+            "loading wait ms": sum(waited for waited, _capped, _lost in run.get("loading_waits", [])),
+            "loading caps": sum(capped for _waited, capped, _lost in run.get("loading_waits", [])),
+            "loading event losses": sum(lost for _waited, _capped, lost in run.get("loading_waits", [])),
             **{key: values[0] for key, values in token_counts.items()},
         },
         "unknown_token_calls": {key: values[1] for key, values in token_counts.items()},
@@ -369,6 +374,10 @@ def review_lines(reviews, kept, exclude, left_out):
         hidden += len(items) - len(unnamed)
         return unnamed
 
+    def members(entries):
+        """A digest's members, each its kind, ID and version prefix, leaving out and counting excluded ones."""
+        return ", ".join(shown(entries)) or "none"
+
     today = date.today()
     waiting = [note for note in kept if not note["approved"] and not note["retired"] and active(note, today)]
     details = shown([f"  {note['id']}: {one_line(note['detail'])}" for note in waiting if note["detail"]])
@@ -379,7 +388,7 @@ def review_lines(reviews, kept, exclude, left_out):
         print(f"skipped {path}: invalid review record", file=sys.stderr)
     for path, digest in records:
         status = digest["status"]
-        if status in {"claimed", "spawning", "running"}:
+        if status in {"claimed", "spawning", "running", "returned"}:
             status = "uncertain" if digest.get("deadline", float("inf")) <= time.time() else "running"
         failed = status in {"failed", "uncertain", "abandoned"}
         if digest["cost_key"] not in cost_keys:
@@ -393,7 +402,15 @@ def review_lines(reviews, kept, exclude, left_out):
         items = [decision_line(decision) for decision in digest.get("decisions", [])]
         proposals = [f"  {fields(item)}" for item in digest.get("proposals", [])]
         flags = [f"  {fields(item)}" for item in digest.get("flags", [])]
-        block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
+        if digest.get("legacy"):
+            block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
+        else:
+            # What was sent and what it acknowledged are separate records: only acknowledgment suppresses work.
+            sent = [f"{item['kind'][:-1]} {item['id']}@{item['version'][:8]}" for item in digest["input_items"]]
+            acknowledged = [f"{kind[:-1]} {key}@{version[:8]}" for kind in ("runs", "notes")
+                            for key, version in digest["acknowledged"][kind].items()]
+            block += [f"{path}:", f"  input: {members(sent)}", f"  acknowledged: {members(acknowledged)}",
+                      *deferred_lines(reviews, digest["batch_id"]), *(shown(items) or ["  no decisions to show"])]
         latest = path, proposals, flags
     if latest:
         # Delegated decision P19 (docs/failure-review-plan.md): open proposals and label flags are the latest
@@ -412,6 +429,24 @@ def review_lines(reviews, kept, exclude, left_out):
     if hidden:
         lines.append(f"review items and note details left out for exclusions: {hidden}")
     return lines + marked(block)
+
+
+def deferred_lines(reviews, batch_id):
+    """How many items a reviewed batch left for a later one, by kind and reason, from its batch record. Never their
+    IDs: the batch named only its own items, and a deferred note's ID can hold a value someone typed."""
+    path = reviews / "batches" / f"{batch_id}.json"
+    if not path.exists():  # a digest without its batch record shows its members only
+        return []
+    try:
+        batch = review_records.read(path, "batch")
+    except (OSError, ValueError):
+        return ["  deferred: unknown; the batch record cannot be read"]
+    counts = Counter((item["kind"][:-1], item["reason"]) for item in batch["deferred"])
+    if not counts:
+        return []
+    return ["  deferred to a later batch: " + ", ".join(
+        f"{number} {kind}{'' if number == 1 else 's'} {review_records.DEFERRED_REASONS[reason]}"
+        for (kind, reason), number in sorted(counts.items()))]
 
 
 def marked(lines):
@@ -466,7 +501,8 @@ def main(argv=None):
             rows.append(facts(run))
             runs[path.stem] = run
         except Exception as error:  # one unreadable or foreign file must not hide the other runs
-            print(f"skipped {path.name}: {error!r}", file=sys.stderr)
+            # Its type only: a message, as a UnicodeDecodeError's, can quote the file, and an excluded run's with it.
+            print(f"skipped {path.name}: {type(error).__name__}", file=sys.stderr)
     if rows:
         groups = {}
         for row in rows:

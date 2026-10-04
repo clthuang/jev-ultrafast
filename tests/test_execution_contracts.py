@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import contextlib
 import json
 import subprocess
 import time
@@ -42,8 +43,12 @@ def observed_page():
             {"id": "scroll_up", "kind": "scroll", "label": "Scroll up", "delta": -500},
         ],
     }
+    page.update(snapshot_schema=2, observation_token=TOKEN)
     page["fingerprint"] = fingerprint(page)
     return page
+
+
+TOKEN = {"schema": 2, "epoch": "test-epoch", "generation": 1, "document_id": 1.5}
 
 
 def choice(action="field"):
@@ -61,7 +66,8 @@ def choice(action="field"):
 
 
 def make_agent(monkeypatch, policy, *, allow_commit=False, trace_path=None):
-    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True))
+    browser = Mock(observe=Mock(side_effect=lambda **_: deepcopy(observed_page())), fresh=Mock(return_value=True),
+                   wait_for_loading=Mock(return_value=None), draining=contextlib.nullcontext, reset_loading=Mock())
     monkeypatch.setattr(loop, "Browser", Mock(return_value=browser))
     agent = loop.Agent("https://example.test/", "Find a book", allowed_operations=policy,
                        allow_commit=allow_commit, trace_path=trace_path)
@@ -609,7 +615,6 @@ def test_final_read_cannot_resume_or_hide_stop(monkeypatch, tmp_path, failure):
 def physical_agent(monkeypatch, *, action="button", trace_path=None):
     agent, clock = timed_agent(monkeypatch, action=action, trace_path=trace_path)
     page = agent.state["page"]
-    page.update(marker="marker", page_key=[], guards={"10": [], "20": []})
     real_browser = browser.Browser.__new__(browser.Browser)
     real_browser.session = "test"
     agent.browser = agent.state["browser"] = real_browser
@@ -620,16 +625,16 @@ def physical_agent(monkeypatch, *, action="button", trace_path=None):
         if method != "Runtime.evaluate":
             return {}
         expression = params["expression"]
-        if expression == browser.MARKER:
-            value = "marker"
-        elif expression == browser.READ_STATE:
+        if expression == browser.READ_STATE:
             value = deepcopy(page)
         elif expression.startswith(browser.SELECT_ACTION):
             value = {"status": "executed", "action_id": "option"}
-        elif "return c ?" in expression:
-            value = [[], []]
-        else:
+        elif expression.startswith(browser.FRESH):
+            value = True
+        elif expression.startswith(browser.TARGET):
             value = {"x": 50, "y": 60}
+        else:  # settling after an input
+            value = None
         return {"result": {"value": value}}
 
     monkeypatch.setattr(browser, "cdp", lambda method, **params: response(method, params))
@@ -674,8 +679,8 @@ def test_expiry_during_browser_preflight_prevents_input(monkeypatch, tmp_path, s
     def protocol(method, **params):
         result = response(method, params)
         expression = params.get("expression", "")
-        if (stage == "freshness" and "return c ?" in expression or
-                stage == "hit_test" and "document.elementFromPoint" in expression):
+        if (stage == "freshness" and expression.startswith(browser.FRESH) or
+                stage == "hit_test" and expression.startswith(browser.TARGET)):
             clock[0] = 90 if stop == "deadline" else 1
             cancelled[0] = stop == "cancellation"
         return result

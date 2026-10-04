@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import builtins
+import contextlib
 import fcntl
 import importlib
 import io
@@ -70,6 +71,20 @@ class FakeBrowser:
 
     def dismiss_dialog(self):
         return self.dialog
+
+    # Server tests freeze time.monotonic for every module, so a real loading wait could never reach its cap: the
+    # fake browser has none, as a browser without its own event source (docs/executor-improvements.md §4.6).
+    def draining(self):
+        return contextlib.nullcontext()
+
+    def wait_for_loading(self, **_control):
+        return None
+
+    def reset_loading(self):
+        pass
+
+    def prepare_loading(self):
+        pass
 
     def close(self):
         self.closed = True
@@ -361,6 +376,53 @@ def test_cancellation_during_the_decision_executes_no_input(monkeypatch):
     assert run["result"]["notes"] == ["cancelled"] and len(run["decisions"]) == 1
     assert run["history"] == [] and run["attempt"] is None
     inputs.assert_not_called()
+
+
+def test_a_read_that_timed_out_after_a_click_is_repeated(monkeypatch):
+    """docs/executor-improvements.md §2.5 case 8: the real tick behind run_goal. The first read after the click times
+    out, and is read again; the click runs once and the run ends done."""
+    answers = iter([
+        {"choice": "e2", "operation": "CLICK", "target": "2", "confidence": 1.0, "probabilities": {"e2": 1.0},
+         "latency_ms": 10, "usage": {}},
+        {"choice": "DONE", "operation": "DONE", "target": None, "confidence": 1.0, "probabilities": {"DONE": 1.0},
+         "latency_ms": 10, "usage": {}},
+    ])
+    inputs, timed_out = Mock(return_value={"executed": "e2"}), []
+    real_observe = FakeBrowser.observe
+
+    def observe(self, screenshot=True, **control):
+        if inputs.called and not timed_out:  # the first read after the click, once
+            timed_out.append(True)
+            raise TimeoutError("Runtime.evaluate timed out after 5s waiting for the daemon")
+        return real_observe(self, screenshot, **control)
+
+    monkeypatch.setattr("jev_ultrafast.agent.choose", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(FakeAgent, "_command", Agent._command)  # the real tick: predict, then act
+    monkeypatch.setattr(FakeBrowser, "fresh", lambda _self, _page, *_args, **_control: True, raising=False)
+    monkeypatch.setattr(FakeBrowser, "act", inputs, raising=False)
+    monkeypatch.setattr(FakeBrowser, "observe", observe)
+    [text, *_image] = mcp_server.run_goal("Search", url=URL, allowed_operations=ALL_OPERATIONS)
+    run = run_file()
+    assert " · done · " in text and timed_out
+    # One step, read again: its page_changed is set, False because the fake page never changes.
+    assert len(run["history"]) == 1 and run["history"][0]["page_changed"] is False and run["repeated_reads"] == 1
+    inputs.assert_called_once()
+
+
+def test_the_final_read_takes_in_no_loading_events(monkeypatch):
+    """The run is over: its final read never drains the tab's event source, so a source that closed after the answer
+    cannot fail the read that proves the outcome (docs/robustness-efficiency/status.md §4.3)."""
+    reads, real_observe = [], FakeBrowser.observe
+
+    def observe(self, screenshot=True, **control):
+        reads.append(control)
+        return real_observe(self, screenshot, **control)
+
+    monkeypatch.setattr(FakeBrowser, "observe", observe)
+    STEPS[:] = [click, done]
+    [text, _image] = mcp_server.run_goal("Search", url=URL, allowed_operations=ALL_OPERATIONS)
+    assert " · done · " in text
+    assert reads[-1]["track"] is False and reads[-1]["settle_input"] is False and reads[-1]["max_attempts"] == 1
 
 
 def test_popup_stops_with_its_url():

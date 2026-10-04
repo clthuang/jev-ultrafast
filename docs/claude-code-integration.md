@@ -256,7 +256,8 @@ try:
     while agent.state["status"] not in {"done", "blocked"}:
         if time.monotonic() > deadline:
             raise ValueError("90 s budget reached")
-        anyio.from_thread.check_cancelled()     # also runs before each input, via agent.before_input
+        anyio.from_thread.check_cancelled()     # also before each input and repeated read, and in a loading
+                                                # wait, via agent.before_input
         agent.command("tick")                   # tested: predict, act, re-read; stale decisions re-read
         if new_tabs := agent.browser.close_popups():
             raise ValueError(f"opened a new tab: {new_tabs[0]}")
@@ -274,24 +275,25 @@ finally:
 - **The site boundary** lives in `Agent.command("act")`, after the decision is consumed and before any input. It checks the URL of the page the decision was made on, so no page read can bypass it. A miss sets `blocked` and raises, as the step budget already does. DONE and BLOCKED perform no input, so a run can end `done` on another site; the fresh read shows that site to Claude.
 - **Browser account:** `Browser` refuses a browser whose debugging port no process of this macOS account listens on, unless the daemon was started with `BU_CDP_URL`/`BU_CDP_WS`. Found live on 2026-09-24: with remote debugging off in the user's Chrome, browser-harness probed port 9223 and attached to a second account's debug Chrome. On refusal the daemon is stopped and no tab opens.
 - **Pop-ups:** after every step, `close_popups()` closes targets whose `openerId` is the executor's tab and returns their URLs. Checked live: `target=_blank` links, `rel=noopener` links and `window.open` all carry the opener ID. A pop-up opens as the active tab, so the user's window briefly shows it until it is closed.
-- **Dialogs:** on browser-harness's `TimeoutError`, the server calls `Page.handleJavaScriptDialog(accept=false)` and stops with "the page showed a dialog; dismissed". The executor never accepts a dialog, so a goal that needs one accepted must be redone in Claude's own tab. Checked live (`scripts/check_guards.py`):
+- **Dialogs:** on browser-harness's `TimeoutError`, the server calls `Page.handleJavaScriptDialog(accept=false)` and stops with "the page showed a dialog; dismissed". After a step, a read that times out is first taken again, up to 2 times, so a dialog that opens after an input stops the run about 10 s later than before (checked in the owned lab: `tests/test_browser_native.py::test_busy_page_reads_again_without_repeating_the_input[dialog]`). The executor never accepts a dialog, so a goal that needs one accepted must be redone in Claude's own tab. Checked live (`scripts/check_guards.py`):
   - **The click raises after 5 s** — a `confirm()` blocks `Input.dispatchMouseEvent` until browser-harness's IPC read timeout raises `_IPCResponseTimeout`, a `TimeoutError` subclass.
   - **Dismissal needs `Page.enable`** — Chrome routes a dialog only to sessions with Page enabled when it opens; otherwise `Page.handleJavaScriptDialog` answers "No dialog is showing". `Browser.__init__` therefore enables Page. `alert()` and `prompt()` behave the same way.
   - **Shared daemon side effects:** with Page enabled, an open dialog in the executor's tab fills browser-harness's single dialog slot, so other clients of the same daemon see it in `page_info()` until it is dismissed. The executor's page loads also re-apply the daemon's tab marker to the tab the daemon is attached to.
 - **SIGTERM** sets an event that the loop also checks. The server waits up to 5 s for its own run to stop at a step boundary, closes its tab, and exits directly with `os._exit`, because mcp's stdin reader thread would otherwise keep the process alive.
-- **Deadline, cancellation and shutdown** are checked between steps and again right before each input (`Agent.before_input`), after that step's model calls. A slow model call can still overrun 90 s by its own duration and retries, but no input happens after the deadline, after Esc, or after SIGTERM (§10).
+- **Deadline, cancellation and shutdown** are checked between steps, again right before each input and each repeated read (`Agent.before_input`), after that step's model calls, and at every 20 ms poll of a loading wait. A slow model call can still overrun 90 s by its own duration and retries, but no input happens after the deadline, after Esc, or after SIGTERM (§10).
 - **Esc cancellation checked on 2026-09-24: yes.** Esc pressed 1.0 s into the Flights run stopped it 3.6 s later at the next step boundary, so the step already in flight (one Jev call and its CLICK) still ran, and the run file's notes say `cancelled` (run `20260924-045037-7ec0`). That run predates the stop check before each input; the re-test after it (run `20260924-051055-b392`, Esc 1.0 s in) stopped with no steps and no input.
 - **Fresh-read failure:** if the final read fails, the result shows the last page the loop read, marked as not fresh, and says why.
+- **A final answer waits for loading** (`docs/executor-improvements.md` §4): a DONE or BLOCKED answer waits while a content request (document, fetch, XHR or script) that the run's recent inputs started is in flight, or started or ended in the last 100 ms, up to 5 s after the last input; the freshness check then decides, so results that arrived make the answer stale and Jev answers again on them. There is no minimum wait. The wait follows the tab's own Network events on a DevTools connection of the server's own, with an observer session of its own on the exact tab, never browser-harness's shared event buffer, which `drain_events()` empties for every client (`docs/robustness-efficiency/status.md` §4.3). It is on with an explicit endpoint (`BU_CDP_URL` or `BU_CDP_WS`). With your own Chrome it is off unless `JEV_LOADING_GATE=1`: Chrome 144+ asks "Allow remote debugging?" for each DevTools connection, so the server opens that one connection at browser setup, bounded at 30 s like the daemon's approval, and reuses it for every tab and goal. `JEV_LOADING_GATE=0` turns it off everywhere. A connection that fails or closes stops the run with `stop_code` `event_connection_lost`; it never reads as a quiet page. The server's final read never waits.
 
 | Status | When | The result's next-step line |
 | --- | --- | --- |
 | `done` | Jev answered DONE on an unchanged page | Verify the page and screenshot, then call `report_outcome` |
 | `blocked` | Jev answered BLOCKED, two WAIT steps on a page that did not change between or after them ("Jev judged the page still loading"), three unchanged actions in a row, three choices in a row gone stale while the page read stayed the same, the Agent's 60-action or 120-decision cap, the site boundary, or the commit boundary | Read the stop reason, then try a narrower goal, widen `allowed_sites`, pass `allow_commit` if the user asked for that commit, or use Claude in Chrome |
-| `stopped` | Any other reason: an error (the repo's messages say whether anything executed), a missing field value, 90 s, cancellation, a new tab, a dialog, a failed save, no open tab, an invalid `url`, or the lock is busy | Read the stop reason and fix its cause; check "may have run" before retrying |
+| `stopped` | Any other reason: an error (the repo's messages say whether anything executed), a missing field value, 90 s, cancellation, a new tab, a dialog, a failed save, no open tab, an invalid `url`, the loading wait's connection closing, or the lock is busy | Read the stop reason and fix its cause; check "may have run" before retrying |
 
 **With learning on,** the default, a run with a failure code gets that code's recovery as its next step instead, and a result that shows site notes adds "see the site notes below" (`docs/failure-review.md` §5 and §6.4). `JEV_LEARNING=0` restores the lines above.
 
-**Before the first run,** the server checks both API keys and calls `ensure_daemon(wait=30)`. A missing key or an unanswered Chrome approval returns as a `stopped` result naming the fix. No tab is opened.
+**Before the first run,** the server checks both API keys and calls `ensure_daemon(wait=30)`. A missing key or an unanswered Chrome approval returns as a `stopped` result naming the fix. No tab is opened. With `JEV_LOADING_GATE=1` and your own Chrome, the first run's setup also asks for the loading wait's connection; an unanswered or refused approval stops that run the same way, and `JEV_LOADING_GATE=0` removes the question.
 
 ### 6.3 Result Claude reads
 
@@ -401,7 +403,7 @@ Each decision entry also gains the page's `omitted_actions` count.
 | --- | --- |
 | **Autonomy** | Runs ending `done` · stops by status and notes |
 | **Correctness** | Verified pass rate (labeled runs with `passed=true`, over all labeled runs) · false-DONE rate · missed-DONE rate · unlabeled rate · failures by site · agreement between Claude's labels and `verify()` on Flights runs |
-| **Speed** | Median run time · median Jev latency · stale decisions per run (decisions dropped because the page changed before their input) |
+| **Speed** | Median run time · median Jev latency · stale decisions per run (decisions dropped because the page changed before their input) · repeated reads (reads after a step that timed out and were taken again) · loading wait ms, loading caps and loading event losses |
 | **Cost** | TypeSafe input tokens · text-model tokens |
 | **Confidence** | Pass rate by the lowest step confidence in a run · CLICK and SELECT decisions by `commit_probability` band (below 0.2, 0.2 to 0.5, 0.5 and above), next to the commit stops |
 | **Coverage** | Runs with truncated candidates (`omitted_actions > 0`) · site changes (from `history` URLs) · new-tab, dialog, and commit stops |
@@ -419,7 +421,7 @@ Each decision entry also gains the page's `omitted_actions` count.
    - Then compare the report by source hash.
 2. **Executor bugs → offline tests:** a failing run's stored page read becomes a fixture for the deterministic code, with no API calls.
 3. **Confidence stop:** add one when the report shows low-confidence steps predict failure (§10).
-4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply`, which checks them. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
+4. **Reviews** (`docs/failure-review.md` §7): ask Claude to "review Jev runs", and it runs `scripts/review_runs.py queue`, reviews the summaries, and passes its decisions to `review_runs.py apply --batch <id>`, which checks them against that exact batch. An automatic review sends the same kind of queue, from runs recorded since the build, to a pinned `claude -p` at most once a day. Either may retire unapproved notes or add new ones, unapproved, flag labels, and propose code changes; only you approve a note, with `uv run python scripts/review_runs.py approve <id>`.
 5. **After editing the code,** reconnect the server with `/mcp`. It runs the code it started with, and the source hash shows which.
 
 ### 7.6 Privacy and data flows

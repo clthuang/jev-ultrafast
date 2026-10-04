@@ -38,7 +38,7 @@ def process_identity(pid):
         elif sys.platform.startswith('linux'):
             path = Path(f'/proc/{pid}/stat')
             fields = path.read_text().rsplit(')', 1)[1].split()
-            if fields[0] == 'Z':
+            if fields[0] in {'Z', 'X'}:
                 return {'state': 'absent'}
             birth, uid, pgid = fields[19], path.stat().st_uid, int(fields[2])
         else:

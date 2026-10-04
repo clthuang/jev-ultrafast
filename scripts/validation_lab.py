@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: a second fixture site, FRAME_HOST, for cross-site iframes
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 MACOS_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 # Playwright's Chromium, preinstalled in Linux containers such as Claude Code on the web.
@@ -31,6 +31,10 @@ PLAYWRIGHT_CHROMIUM = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-b
 PROCESS_WAIT_SECONDS = 5
 STARTUP_SECONDS = 30
 PROXY_LIMIT_BYTES = 4 * 1024 * 1024
+# A second site for out-of-process (cross-site) iframes: the proxy forwards this one name, at the fixture's port, to the
+# same owned fixture server. Nothing resolves it: Chrome reaches it only through the proxy (.test is reserved).
+FRAME_HOST = "jev-frame.test"
+LAB_DELAY_SECONDS = 10  # the longest a fixture response may be held
 
 
 def default_chrome():
@@ -194,8 +198,9 @@ def _validate_endpoints(manifest, live, *, complete):
     if "proxy" in live and (complete or "proxy_port" in manifest):
         ready = json.loads((Path(manifest["root"]) / "proxy-ready.json").read_text())
         expected = {"lab_id": manifest["lab_id"], "port": manifest["proxy_port"],
-                    "allowed_origin": manifest["fixture_url"]}
-        if ready != expected or manifest["fixture_url"] != f"http://127.0.0.1:{manifest['fixture_port']}":
+                    "allowed_origin": manifest["fixture_url"], "frame_origin": manifest["frame_url"]}
+        if (ready != expected or manifest["fixture_url"] != f"http://127.0.0.1:{manifest['fixture_port']}"
+                or manifest["frame_url"] != f"http://{FRAME_HOST}:{manifest['fixture_port']}"):
             raise LabSafetyError("Proxy allowlist changed")
     if "chrome" in live:
         command = manifest["processes"]["chrome"]["command"]
@@ -427,14 +432,15 @@ def prepare(output, chrome=None, fixtures=None):
         if ready["lab_id"] != lab_id:
             raise LabSafetyError("Fixture server identity does not match")
         manifest.update(fixture_port=ready["port"], fixture_url=f"http://127.0.0.1:{ready['port']}",
-                        canary_port=ready["canary_port"])
+                        frame_url=f"http://{FRAME_HOST}:{ready['port']}", canary_port=ready["canary_port"])
         _listener_owned(manifest["processes"]["fixtures"]["pid"], manifest["fixture_port"])
         proxy_ready = root / "proxy-ready.json"
         spawn("proxy", [sys.executable, str(Path(__file__).resolve()), "serve-proxy", "--fixture-port",
                         str(manifest["fixture_port"]), "--identity", lab_id, "--ready", str(proxy_ready),
                         "--audit", str(root / "proxy-audit.jsonl")])
         ready = _wait_for(lambda: json.loads(proxy_ready.read_text()), time.monotonic() + STARTUP_SECONDS)
-        if ready["lab_id"] != lab_id or ready["allowed_origin"] != manifest["fixture_url"]:
+        if (ready["lab_id"] != lab_id or ready["allowed_origin"] != manifest["fixture_url"]
+                or ready["frame_origin"] != manifest["frame_url"]):
             raise LabSafetyError("Proxy server identity or allowlist does not match")
         manifest["proxy_port"] = ready["port"]
         _listener_owned(manifest["processes"]["proxy"]["pid"], manifest["proxy_port"])
@@ -507,7 +513,7 @@ def close(path):
 
 
 def proxy_target(method, target, headers, fixture_port):
-    """Accept only an absolute HTTP URL for the exact fixture authority; never resolve other hosts."""
+    """Accept only an absolute HTTP URL for one of the two exact fixture authorities; never resolve other hosts."""
     if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
         raise LabSafetyError("Proxy method denied")
     if headers.get("Upgrade") or "upgrade" in headers.get("Connection", "").lower():
@@ -515,10 +521,10 @@ def proxy_target(method, target, headers, fixture_port):
     if headers.get("Transfer-Encoding"):
         raise LabSafetyError("Ambiguous proxy request framing denied")
     parsed = urlparse(target)
-    authority = f"127.0.0.1:{fixture_port}"
-    if (parsed.scheme != "http" or parsed.netloc != authority or parsed.fragment
-            or headers.get("Host") != authority or any(character in target for character in "\r\n\x00")):
-        raise LabSafetyError("Proxy destination denied: fixture origin only")
+    authorities = {f"127.0.0.1:{fixture_port}", f"{FRAME_HOST}:{fixture_port}"}
+    if (parsed.scheme != "http" or parsed.netloc not in authorities or parsed.fragment
+            or headers.get("Host") != parsed.netloc or any(character in target for character in "\r\n\x00")):
+        raise LabSafetyError("Proxy destination denied: fixture origins only")
     try:
         length = int(headers.get("Content-Length", "0"))
     except ValueError as error:
@@ -586,7 +592,8 @@ def serve_proxy(fixture_port, identity, ready, audit):
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     Path(ready).write_text(json.dumps({"lab_id": identity, "port": server.server_port,
-                                      "allowed_origin": "http://" + authority}))
+                                      "allowed_origin": "http://" + authority,
+                                      "frame_origin": f"http://{FRAME_HOST}:{fixture_port}"}))
     server.serve_forever()
 
 
@@ -609,6 +616,7 @@ def serve_fixtures(root, identity, ready):
     canary = CanaryServer(("127.0.0.1", 0), CanaryHandler)
     threading.Thread(target=canary.serve_forever, daemon=True).start()
     forbidden = f"http://127.0.0.1:{canary.server_port}"
+    submissions, submissions_lock = {}, threading.Lock()  # per test key: the submissions this server received
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -634,8 +642,13 @@ def serve_fixtures(root, identity, ready):
                         "service": f"oninstall=e=>e.waitUntil({fetch}.then(()=>self.skipWaiting()));"}[kind]
                 self.respond(code, "text/javascript")
                 return
+            if request.path == "/__lab__/count":
+                key = parse_qs(request.query).get("key", [""])[0]
+                with submissions_lock:
+                    self.respond(json.dumps({"key": key, "count": submissions.get(key, 0)}), "application/json")
+                return
             if request.path in {"/__lab__", "/delay"}:
-                delay = min(10, max(0, float(parse_qs(request.query).get("seconds", ["0"])[0])))
+                delay = min(LAB_DELAY_SECONDS, max(0, float(parse_qs(request.query).get("seconds", ["0"])[0])))
                 time.sleep(delay)
                 payload = json.dumps({"lab_id": identity, "ready": True}).encode()
                 self.send_response(200)
@@ -645,6 +658,20 @@ def serve_fixtures(root, identity, ready):
                 self.wfile.write(payload)
             else:
                 super().do_GET()
+
+        def do_POST(self):
+            """A form submission: counted when it arrives, answered after ?seconds= (at most LAB_DELAY_SECONDS)."""
+            request = urlparse(self.path)
+            if request.path != "/__lab__/submit":
+                self.send_error(404)
+                return
+            query = parse_qs(request.query)
+            key = query.get("key", [""])[0]
+            with submissions_lock:
+                submissions[key] = count = submissions.get(key, 0) + 1
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            time.sleep(min(LAB_DELAY_SECONDS, max(0, float(query.get("seconds", ["0"])[0]))))
+            self.respond(json.dumps({"key": key, "count": count}), "application/json")
 
         def respond(self, text, content_type):
             payload = text.encode()

@@ -1,5 +1,6 @@
 """Offline contracts for a dynamic operation/target policy. No paid APIs."""
 
+import contextlib
 import json
 import time
 from copy import deepcopy
@@ -27,6 +28,8 @@ def page():
             {"id": "e3", "kind": "click", "label": "Go", "role": "button", "value": "", "node": 20},
             {"id": "wait", "kind": "wait", "label": "Wait"},
         ],
+        "snapshot_schema": 2,
+        "observation_token": {"schema": 2, "epoch": "test-epoch", "generation": 1, "document_id": 1.5},
     }
     state["fingerprint"] = fingerprint(state)
     return state
@@ -239,7 +242,9 @@ def runner():
     a.trace_path = None
     a.before_input = None
     p = page()
-    a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p))
+    # A stand-in browser: no loading wait, as a real one without its own event source (status.md §4.3).
+    a.browser = Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p),
+                     wait_for_loading=Mock(return_value=None), draining=contextlib.nullcontext, reset_loading=Mock())
     # The real builder, so every state key the Agent adds is present here too.
     a._fresh_state("Find a book", p, None, allowed_operations=ALL_OPERATIONS)
     a.state.update(decision=decision(), status="predicted", started_at=time.perf_counter())
@@ -279,7 +284,7 @@ def test_changed_field_context_does_not_reuse_generated_text(runner, monkeypatch
     assert helper.call_count == 2
 
 
-def test_loading_waits_do_not_trigger_no_progress_stop(runner):
+def test_wait_steps_do_not_trigger_no_progress_stop(runner):
     # Five unchanged steps, never three clicks in a row: a WAIT breaks the no-progress count, and one WAIT stays below
     # the count that hands the run back to Claude (docs/executor-improvements.md §5).
     for action in ("e3", "e3", "wait", "e3", "e3"):
@@ -433,6 +438,7 @@ def test_browser_opens_its_own_unfocused_window_unless_background_tab_is_set(mon
 
     monkeypatch.setattr(browser, "ensure_daemon", lambda **_: None)
     monkeypatch.setattr(browser, "foreign_browser_port", lambda: None)
+    monkeypatch.setattr(browser, "daemon_browser_kind", lambda: "local")  # your own Chrome: no loading wait
 
     def created(**environment):
         for key, value in {"JEV_BACKGROUND_TAB": None, **environment}.items():
@@ -701,12 +707,18 @@ def act(runner, action="e3", **decision_fields):
 def test_new_goal_resets_every_counter(runner):
     browser = runner.browser
     runner.state.update(
-        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5
+        history=[{"step": 1}], decisions=[{}], text_calls=[{}], stale_decisions=2, stale_streak=2, elapsed_ms=5,
+        repeated_reads=2, loading_waits=[[748, False, False]],
     )
+    with pytest.raises(ValueError):  # an invalid policy changes nothing, the browser's loading state included
+        runner.new_goal("Open the cart", allowed_operations=["UNKNOWN"])
+    browser.reset_loading.assert_not_called()
+    assert runner.state["repeated_reads"] == 2 and runner.state["loading_waits"] == [[748, False, False]]
     runner.new_goal("  Open the cart  ", allowed_sites=["shop.test"], allowed_operations=ALL_OPERATIONS)
     state = runner.state
     assert (state["history"], state["decisions"], state["text_calls"], state["stale_decisions"]) == ([], [], [], 0)
-    assert state["stale_streak"] == 0
+    assert state["stale_streak"] == 0 and state["repeated_reads"] == 0 and state["loading_waits"] == []
+    browser.reset_loading.assert_called_once_with()  # a valid goal tracks nothing from the last one
     assert state["decision"] is None and state["status"] == "ready" and state["attempt"] is None
     assert state["allow_commit"] is False
     assert state["started_at"] is None and state["elapsed_ms"] == 0

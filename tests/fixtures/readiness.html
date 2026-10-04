@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Readiness fixture</title>
+<style>
+body{margin:0;font:14px sans-serif}
+button{display:block;margin:6px 10px}
+iframe{width:300px;height:80px}
+#spacer{height:3000px}
+</style>
+<h1 id="status">Ready</h1>
+<p id="results">No results yet</p>
+<button type="button" id="search">Search</button>
+<button type="button" id="later">Start later</button>
+<button type="button" id="poll">Poll forever</button>
+<button type="button" id="slow">Slow request</button>
+<button type="button" id="frame">Open frame</button>
+<button type="button" id="navigate">Navigate</button>
+<button type="button" id="alert">Alert</button>
+<div id="spacer"></div>
+<script>
+// ?key= names this page's submissions on the fixture server (/__lab__/count?key= counts them). ?busy= keeps the main
+// thread busy that many ms right after a Search, as a heavy results page does, so a read times out; the results
+// render at the end of that task. ?frame= is the lab's second fixture site, for a cross-site (out-of-process) iframe.
+(() => {
+const params=new URLSearchParams(location.search), key=params.get('key')||'none';
+const busy=Number(params.get('busy'))||0, frame=params.get('frame')||'';
+window.clicks={};
+const show=(id,text)=>{document.querySelector('#'+id).textContent=text};
+const counted=(id,handler)=>()=>{window.clicks[id]=(window.clicks[id]||0)+1;handler()};
+const on=(id,handler)=>document.querySelector('#'+id).addEventListener('click',counted(id,handler));
+const load=(seconds,id,text)=>fetch('/delay?seconds='+seconds).then(r=>r.json()).then(()=>show(id,text));
+on('search',()=>{
+  fetch('/__lab__/submit?key='+encodeURIComponent(key),{method:'POST'}).catch(()=>{});
+  setTimeout(()=>{
+    const end=performance.now()+busy;
+    while (performance.now()<end) {}
+    show('results','Results for '+key);
+    const details=document.createElement('button');
+    details.type='button';
+    details.id='details';
+    details.textContent='Load details';
+    details.addEventListener('click',counted('details',()=>load(0.8,'results','Details loaded for '+key)));
+    document.querySelector('#search').after(details);
+  },0);
+});
+on('later',()=>setTimeout(()=>load(1,'status','Later loaded'),300));
+on('poll',()=>load(10,'status','Poll ended'));
+on('slow',()=>load(1.5,'status','Slow loaded'));
+on('frame',()=>{
+  const element=document.createElement('iframe');
+  element.src=frame+'/delay?seconds=2';
+  document.body.append(element);
+});
+on('navigate',()=>{location.href='/delay?seconds=1'});
+on('alert',()=>setTimeout(()=>alert('The page is busy'),0));
+})();
+</script>

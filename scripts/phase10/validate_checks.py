@@ -8,7 +8,7 @@ import time
 
 from tasks import TASKS
 
-from jev_ultrafast.browser import Browser
+from jev_ultrafast.browser import Browser, SnapshotTooLarge
 
 END_PAGES = {
     "nav-python-macos": "https://www.python.org/downloads/macos/",
@@ -60,8 +60,12 @@ def read(url):
 for task in TASKS:
     if sys.argv[1:] and task["id"] not in sys.argv[1:]:
         continue
-    start_passes = task["check"](read(task["url"]))
     end_url = END_PAGES.get(task["id"])
-    end_passes = task["check"](read(end_url)) if end_url else None
+    try:
+        start_passes = task["check"](read(task["url"]))
+        end_passes = task["check"](read(end_url)) if end_url else None
+    except SnapshotTooLarge as overflow:  # a page this check cannot read is never judged to pass
+        print(f"FIX  {task['id']}: {overflow}", flush=True)
+        continue
     verdict = "OK" if not start_passes and end_passes in (True, None) else "FIX"
     print(f"{verdict}  {task['id']}: start page passes={start_passes}, end page passes={end_passes}", flush=True)

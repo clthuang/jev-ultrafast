@@ -88,7 +88,9 @@ def flights_page(destination):
 
 
 def test_report_counts_false_and_missed_done(tmp_path, capsys):
-    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)])
+    # Run 1 has the readiness counters; the others, as run files from before them, have none.
+    write_run(tmp_path, 1, "done", [("claude", True), ("claude", False)], repeated_reads=2,
+              loading_waits=[[748, False, False], [5000, True, True]])
     write_run(tmp_path, 2, "blocked", [("claude", True)])
     risky = {**DECISION, "confidence": 0.3, "commit_probability": 0.7}
     write_run(tmp_path, 3, "done", [("user", True), ("claude", False)], decisions=[risky])
@@ -108,6 +110,10 @@ def test_report_counts_false_and_missed_done(tmp_path, capsys):
         "pass by lowest confidence <0.5 1/1 (100%), 0.5-0.8 2/3 (67%), >=0.8 0/0",
         "CLICK/SELECT by commit_probability <0.2 4, 0.2-0.5 0, >=0.5 1",
         "site changes 1",
+        "repeated reads 2",
+        "loading wait ms 5748",
+        "loading caps 1",
+        "loading event losses 1",
     ]:
         assert expected in everything
 
@@ -479,10 +485,25 @@ def store_review(path, record):
 
 def test_mixed_legacy_and_v2_reporting(tmp_path):
     store_review(tmp_path / '20260927-100000.json', {'decisions': [], 'flags': [], 'proposals': [], 'cost': 0.2})
-    store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32))
-    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    sent = {'20261003-100000-0001': 'b' * 64, '20261003-100100-0002': 'c' * 64, '20261003-100200-0003': 'e' * 64}
+    record = v2_record('a' * 32)
+    record['input_items'] = [{'kind': 'runs', 'id': key, 'version': version, 'reasons': ['failed']}
+                             for key, version in sent.items()]
+    record['input_items'].append({'kind': 'notes', 'id': 'example.com-1', 'version': 'd' * 64,
+                                  'reasons': ['new']})
+    acknowledged = dict(list(sent.items())[:2])
+    record['acknowledged'] = {'runs': acknowledged, 'notes': {}}  # sent is not acknowledged
+    path = tmp_path / ('a' * 32 + '.json')
+    store_review(path, record)
+    lines = report_runs.review_lines(tmp_path, [], {'20261003-100100-0002'}, set())
+    text = '\n'.join(lines)
     assert 'reviews: 2, 0 failed, cost $0.3000' in text
-    assert review_records.acknowledged(tmp_path) == {'runs': {}, 'notes': {}}
+    assert (f'{path}:\n  input: run 20261003-100000-0001@bbbbbbbb, run 20261003-100200-0003@eeeeeeee, '
+            'note example.com-1@dddddddd\n  acknowledged: run 20261003-100000-0001@bbbbbbbb\n'
+            '  no decisions to show') in text
+    assert 'review items and note details left out for exclusions: 2' in text  # the excluded run, twice
+    assert review_records.acknowledged(tmp_path) == {'runs': {key: {value} for key, value in acknowledged.items()},
+                                                     'notes': {}}
 
 
 def test_running_attempt_is_not_failed(tmp_path):
@@ -534,3 +555,13 @@ def test_malformed_history_does_not_hide_valid_reports(tmp_path, capsys, broken)
     text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
     assert 'reviews: 1, 0 failed, cost $0.1000' in text
     assert 'invalid review record' in capsys.readouterr().err
+
+
+def test_an_unreadable_run_file_is_named_by_its_error_type_only(tmp_path, capsys):
+    """A decode error's message quotes the file: an excluded run's goal and typed text could follow it."""
+    write_run(tmp_path, 1)
+    (tmp_path / "20260924-100002-abcd.json").write_bytes(b'{"goal": "Typedcanary search \xff", "history": []}')
+    report_runs.main(["--runs", str(tmp_path)])
+    output = capsys.readouterr()
+    assert "skipped 20260924-100002-abcd.json: UnicodeDecodeError" in output.err
+    assert "Typedcanary" not in output.out + output.err

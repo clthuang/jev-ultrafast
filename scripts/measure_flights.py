@@ -56,8 +56,14 @@ finally:
     state = agent.snapshot()
     measured_calls = {method: {"count": len(times), "ms": round(sum(times), 3)} for method, times in calls.items()}
     # Both arms use a NEW final observation for the independent result check, outside timing.
-    final = agent.browser.observe(screenshot=True)
-    state["verification"] = verify(final)
+    # A revision measured with --source may predate SnapshotTooLarge: then nothing is caught here.
+    too_large = getattr(browser_module, "SnapshotTooLarge", ())
+    try:
+        final = agent.browser.observe(screenshot=True)
+        state["verification"] = verify(final)
+    except too_large as overflow:  # an unreadable final page is unverified, never a pass
+        final = None
+        state["verification"] = {"passed": False, "unverified": overflow.code, "details": overflow.details}
     state["error"] = error
     state["cdp"] = measured_calls
     state["source_hashes"] = source_hashes

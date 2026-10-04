@@ -1,0 +1,354 @@
+# Robustness and efficiency: status and continuation
+
+This file is the ledger for [the implementation plan](../robustness-efficiency-implementation-plan.md). It replaces
+the handover's machine-bound ledger (`artifacts/robustness-efficiency-implementation/<run_id>/progress.json` on the
+original Mac, preserved in history at `1bb0449:docs/handover/2026-10-04/continuation/progress.json`). The plan's
+contracts, task boundaries and acceptance criteria are unchanged; only where work runs and how evidence is kept
+changed, as §2 and §3 record.
+
+## 1. Task status
+
+| Stage | Tasks | Status | Evidence |
+| --- | --- | --- | --- |
+| Baseline | SETUP-1…3, GATE-BASELINE | Done, 2026-10-03 | Original machine: 34 harness tests, native egress proof (zero forbidden connections), production files hash-identical |
+| Policy | POLICY-1…3, GATE-POLICY | Done, 2026-10-03 | Original machine: 10 named nodes, 274 focused tests; reviewer `browser_review` READY |
+| Select | SELECT-1…2, GATE-SELECT | Done, 2026-10-03 | Original machine: 333 offline + 30 native; 19 changed-state cases reject before input; reviewer `execution_review` READY |
+| Limits | LIMITS-1…2, GATE-LIMITS | Done, 2026-10-04 | Original machine: 15 named nodes / 45 variants, 422 focused tests; reviewer `browser_review` READY |
+| Prerequisites | PRIVACY-1, RUNS-1 | Done, 2026-10-04 | Original machine: 32 and 338 focused tests; reviewer `execution_review` READY |
+| Reviews | REVIEWS-1…7, GATE-REVIEWS | Done, 2026-10-04 | Cloud: 53 named nodes / 76 variants (PRIVACY RUNS REVIEWS), 310 review-scope and 705 offline tests, Ruff; reviewers `execution_review` and `review_pipeline` (privacy) READY after three rounds, 34 findings closed, each fix pinned by a mutant-killing test (§4.1) |
+| Snapshot | SNAPSHOT-1…2, GATE-SNAPSHOT | Done, 2026-10-04 | Cloud, `0e48727`: 10 named nodes / 52 variants with `--native`, 714 offline tests, 31 browser-native tests plus the egress proof, `check_guards.py` 23 checks; reviewer `browser_review` HOLD on test evidence only, then READY (60 of 62 mutants caught, 2 equivalent) (§4.2) |
+| Readiness | READINESS-1…3, GATE-READINESS | Implemented at `952ef93`; gate review to re-run (§5) | Cloud: 45 named nodes / 48 variants with `--native` (`plan_tests.py READINESS`), 40 native tests, `check_guards.py` 25 checks; the case-by-case record in `readiness-test-map.md` (§4.3) |
+| Release | RELEASE-1…3, GATE-RELEASE | RELEASE-3 drafted at `f476832`; RELEASE-1 and RELEASE-2 not started | `scripts/rehearse_activation.py` passes on both disposable stores; 801 offline tests; wheel smoke 19 sources (§4.4, §5) |
+
+Re-run in the cloud on 2026-10-04 at `a94014b` (main after consolidation): every plan-named node through REVIEWS-7
+exists and passes — 90 nodes, 244 variants, none skipped or xfailed, the 3 native SELECT nodes included
+(`scripts/plan_tests.py SETUP POLICY SELECT LIMITS PRIVACY RUNS REVIEWS --native`). The full offline suite passes
+(597) and the full native suite passes (30). This re-run confirms the earlier gates still hold on the consolidated
+tree; it is not a substitute for GATE-REVIEWS' independent review.
+
+## 2. Building and testing in the cloud
+
+**Can this be implemented and tested in a cloud container? Mostly yes, with three explicit limits.**
+
+What works here (verified 2026-10-04, Linux container, Playwright Chromium 141 headless):
+
+- **All offline work.** Every runtime change in the remaining stages is Python or in-page JavaScript, and the
+  plan's correctness checks are offline tests with fakes, a fake clock and the node-based snapshot harness.
+- **Native browser checks.** `scripts/validation_lab.py` starts an owned headless Chrome with a fresh profile, a local
+  fixture server and a deny-by-default proxy; every other destination is refused and audited. It needed three
+  portability fixes (no sandbox only as root, `/proc`-based process identity, an explicit browser path). All 30
+  native tests pass; `validation_lab.py run` closes the lab even when tests fail.
+- **Evidence and review.** Git commits identify every source state; independent reviewers are fresh agents given a
+  fixed commit and scope.
+
+What cannot be validated here, and stays an explicit limit in every gate report:
+
+1. **Live sites and paid models.** No `TYPESAFE_API_KEY`/`TEXT_MODEL_API_KEY` exist here, the plan authorizes no paid
+   call in these stages, and datacenter IPs see consent and bot pages that make Google Flights timings
+   unrepresentative. Performance claims need the separate paid protocol in the plan's §8.
+2. **Headful, user-profile behaviour.** Window placement and focus (`foreground_window`, `show_window`, the background
+   window), extensions such as 1Password, and a signed-in profile behave differently in headless Chrome. The lab
+   proves DOM, CDP, freshness, SELECT and network-readiness logic, not these.
+3. **Production activation.** The live `jev-mcp` servers and the real `artifacts/` store are on the user's machine.
+   RELEASE-3 rehearses detection, backup, migration and rollback on disposable state; the real activation is the
+   user's step, with the runbook.
+
+## 3. How evidence is kept now
+
+- **Source identity is a commit SHA**, replacing the hash manifests that guarded a separate candidate directory.
+  There is no live writer in the container, so SETUP-3's isolation concern does not arise here; it returns at
+  activation (RELEASE-3).
+- **Each gate records**, in §1 and its stage section: the commit, the exact commands, exit status and counts, the
+  named-node result from `scripts/plan_tests.py`, the reviewer's scope and verdict, and every finding's resolution.
+  Raw logs are not committed; each is reproducible by re-running the command at the recorded commit.
+- **Named acceptance nodes** are checked by `uv run python scripts/plan_tests.py <stage> [--native]`: it extracts the
+  plan's Verify nodes (plus the 45 inherited readiness nodes for GATE-READINESS), fails on a missing node, an empty
+  collection, or any failed, skipped or xfailed variant, and runs native nodes in a fresh owned lab.
+- **Independent review** is a fresh agent with no implementation context, a fixed commit and an explicit scope,
+  matching the plan's reviewer roles (`execution_review`, `browser_review`, `review_pipeline`). Blockers and
+  should-fix findings are resolved before a gate closes.
+- **Never counted as a pass:** a missing or skipped required case, zero tests collected, a mocked substitute for a
+  native requirement, or a test whose assertions are weaker than the plan's Pass line.
+
+## 4. Remaining work: designs and order
+
+Order is unchanged: GATE-REVIEWS → GATE-SNAPSHOT → GATE-READINESS → GATE-RELEASE, one implementer at a time,
+independent reviewers on frozen commits. The designs below come from the current code (audits on 2026-10-04 at
+`979067a`); file:line references are to that commit.
+
+### 4.1 REVIEWS: close the audit's defects, then the gate
+
+Code and all 46 plan-named nodes (62 variants) exist and pass, but the audit found defects that the named tests do not
+catch. Each fix lands with a test that fails before it.
+
+| ID | Defect (severity) | Design |
+| --- | --- | --- |
+| R1 | A paid attempt's short sections (`transition`, batch verification, apply, final settlement) take the review lock with `LOCK_NB` (`review_runs.py:841-850`). A concurrent manual `queue`/`apply`/`enable` makes the attempt fail: a child killed before its identity is saved leaves `child: null`, which blocks every later dispatch; a paid reply returned during contention is discarded and the attempt later counts as a failure (High) | Internal paid sections wait for the review lock up to a bound (`SHORT_LOCK_SECONDS`); manual commands keep the immediate BUSY reply. The global order dispatch → review → metadata → notes keeps waiting deadlock-free (manual commands never take dispatch). Save known cost and the reaped-child fact as soon as `launch` returns, in memory first and then under the lock, so neither is lost to a later failure. Tests hold the lock from another thread during each transition: one launch, reply applied or cost kept, no failure counted from contention, next dispatch not blocked |
+| R2 | A blocked dispatch can never be cleared, and a legacy `running` timestamp from the baseline's `begin()` blocks every dispatch forever (`1166-1167`); neither `enable` nor migration clears it (High) | Holding the review lock proves no baseline review is alive (the baseline held the same lock for its whole run), so a legacy, non-attempt `running` value settles once as one failure — the baseline `settle()` rule — in one state replacement. Add `resolve <attempt_id>`: confirmed at a terminal like `approve`, refuses while the recorded process group is alive, settles an unknown-ownership attempt once as abandoned |
+| R3 | After notes+receipt commit, a digest-recovery error reaches `apply`'s generic "Reply could not be applied" (`1354-1357`), a false "nothing changed" (Medium-high) | A distinct committed-but-recovery-pending error after the commit point, with its own wording; add a `recover` command. Tests through the CLI: wording, receipt retained, and both another batch's apply and a paid dispatch refused until recovery; conflicting and malformed existing digests |
+| R4 | Batch membership and deferred items are never shown: `queue` prints "Nothing is queued." when everything is deferred, and `report_runs` omits input membership (Medium) | `queue` prints the selected items (kind, ID, version prefix) and every deferred item with its reason to stderr; `report_runs` prints `input:` and `acknowledged:` per v2 digest through its privacy-safe `shown()` |
+| R5 | Test gaps (see below) | Strengthen the named tests whose assertions are weaker than the plan's Pass lines; add tests for pre-cap eligibility, the three-failure disable rule, expired-child termination, the timer/reap guard and `review_processes.process_identity` |
+| R6 | Batch `since` and attempt `error` unvalidated; `queue` catches only `ValueError`; dead helpers that bypass the commit protocol (`apply_decision`, `write_digest`, `begin`/`finish`/`settle`) (Low) | Validate; catch `PublicationUncertain`/`OSError` with fixed wording; delete the dead helpers (move a test-only writer into the test) |
+| R7 | `review_records.timestamp` reads naive local times as UTC, so `last_start` comparisons are off by the UTC offset (Low) | Interpret naive stored times as local, as they are written |
+| R8 | Docs show `apply` without `--batch`; preflight lost its diagnostic lines; REVIEWS-7's backlog/cutoff note is missing (Low) | Fix the docs and restore the preflight lines |
+
+Tests that assert less than the plan, to strengthen: `test_real_pipeline_redacts_every_publication_surface` (check the
+report output and stderr, run the CLI, exercise a valid decision beside a refusal, an excluded predecessor, the start
+failure / did-not-start / crash messages, a migration step); `test_attempt_records_never_acknowledge_items` (a real
+failed attempt); `test_unknown_record_versions_fail_closed` (through the readers); `test_crash_at_each_publication_boundary`
+(receipt survives, CLI wording, pending recovery blocks work, a paid-path and a conflicting-digest variant);
+`test_all_note_writers_preserve_pending_receipt` (add `record_failure`); `test_auto_cutoff_and_exclusions_survive_migration`
+(a real state file and a paid `auto`); `test_export_preserves_new_notes_outcomes_receipts_and_ack_history` (legacy
+digests, legacy state, retired notes); `test_mixed_legacy_and_v2_reporting` (membership);
+`test_live_or_unknown_child_blocks_new_dispatch` (an expired child is terminated only after identity checks).
+
+**Gate.** `scripts/plan_tests.py REVIEWS`, the full offline suite, Ruff; then two independent reviews of the frozen
+commit — execution/storage (locks, crash points, dispatch, migration) and reporting/privacy (every output sink) — with
+all blockers and should-fix findings resolved. The compatible rollback export is RELEASE-3's.
+
+**Gate review, round 1 (frozen at `f1d7ffc`): both HOLD.** Each finding was reproduced by the reviewer; each fix has a
+test that fails on the reviewer's mutant (18 mutants of the should-fix items and 6 of the nits, all caught).
+
+| ID | Finding (reviewer, severity) | Resolution |
+| --- | --- | --- |
+| R9 | A start_at_url note's code-derived URL was checked only against the chain without excluded runs, so a value only an excluded predecessor typed was stored and later shown (privacy, blocker) | The note is checked as the server checks a lesson, over its whole chain with excluded runs, and its URL against every value of the batch's privacy closure (which links across sites too) |
+| R10 | Deferred IDs printed raw on `queue` stderr and in `auto.log` (privacy, should-fix) | Every membership line passes the selected batch's privacy quote: a deferred note on a typed site shows `<value>` |
+| R11 | Deferred items invisible when a paid review launches (privacy, should-fix) | Paid paths print the membership lines with the attempt; the report counts each committed batch's deferred items by kind and reason, never their IDs |
+| R12 | The real-pipeline test missed sinks: the MCP-server slot, a deferred canary ID, a start_at_url URL, the automatic "nothing eligible" path, `report_runs.main` (privacy, should-fix) | All five added to `test_real_pipeline_redacts_every_publication_surface` |
+| R13 | A notes-store read error after the commit point reached "could not be applied" (execution, should-fix) | Any failure after the commit point is `RecoveryPending(True)`; a re-applied reply whose own receipt is pending is told its decisions are committed |
+| R14 | `resolve` could signal an expired reviewer, settle while the leader's group lived, and ignore a pending receipt (execution, should-fix) | `resolve` publishes a pending receipt first, never signals, refuses while the identity matches or the group may live, and reads the terminal confirmation holding only the dispatch lock, re-checking everything after it |
+| R15 | A settled attempt whose verified exit was never saved blocked dispatch for good (execution, should-fix) | The final section saves the verified exit before settlement; `resolve` records the exit of a settled attempt without counting it again |
+| R16 | Pass lines without a pinning test (execution, should-fix) | Tests for the uncertain notes publication through the CLI, committed evidence in the final section and in later recovery, the accounted-ID guard, a group outliving its leader, and the identity check before each signal |
+| R17 | Nits: exit-record failure lost the reply and cost; `apply` hid BUSY and a conflicting reply; short locks held while stopping a child; `running` untyped; report printed an exception's repr; clipping could make a value whole; year-1 times crashed readers | Fixed, each with a test: `on_exit` failures are contained; distinct `apply` messages; an expired reviewer is stopped holding only the dispatch lock; `running` and `last_start` validated; exception type only; quote–clip–quote; `valid_time` uses `timestamp()` |
+
+**Round 2 (`0456e40`): execution READY with nits; privacy HOLD on test evidence only.** Every round-1 finding
+reproduced as fixed. Privacy: each half of R9 (the closure URL check, the whole-chain check) could be removed without
+a test failing, the report's deferred IDs were masked by the test, and a launched review's membership lines were
+unasserted — now pinned (`3cdcfb5`); an echoed note ID with a line break could forge an output line (whitespace
+folded); "still queued" was wrong after a later batch (reworded); a year-1 legacy digest name crashed the report
+(validated). Execution: a reviewer whose leader exited while its group lived was blocked with circular guidance, and
+`ps` failing made it unresolvable — dispatch and `resolve` now name the group, `resolve` asks the user when `ps`
+cannot tell, and a leaderless group is never signalled (`9b10c8f`); unreadable notes files are named.
+
+**Round 3 (`3cdcfb5`, `9b10c8f`): both READY.** Remaining nits fixed after the verdicts: reply and provider text that
+review_runs prints passes the report's control-character filter, and the privacy test masks only the seeded note's
+listing (`7767e39`); dispatch and `resolve` name a process whose identity was never read instead of promising the next
+review stops it, and `resolve`'s question says when committed evidence settles the attempt as succeeded (this commit).
+Commands at the closing commit: `scripts/plan_tests.py PRIVACY RUNS REVIEWS` (53 nodes / 76 variants), the full
+offline suite and Ruff, all passing.
+
+### 4.2 SNAPSHOT: schema-2 snapshots
+
+Measured before schema 2 with a synthetic page (one form, 6,000-character shared context): one observation of
+250 / 1,000 / 5,000 buttons serializes to 1.60 / 6.22 / 30.90 MB, almost all per-action guards (each carries its
+scope's text, and guards are built before the 250-action cap). Every global freshness check re-runs the whole snapshot
+and returns a 25 KB–1 MB marker. Schema 2's observation of the same pages measures 38 KB in Chromium (below).
+
+**In-page protocol** (`snapshot.js` is a side-effect-free library exposing `observe`, `fresh`, `target` and
+`select`; `reference`, which resolves an offered action to its retained node, is internal to them):
+
+- One `scan()` shared by observe and fresh: today's candidate rules, weak IDs only (a `WeakMap`), no retention.
+- `observe` offers the first 250 target actions, builds guards only for those nodes (each distinct scope's text read
+  once), and stores in the page a baseline: the exact global semantic marker (all candidates, evidence and form controls,
+  as today), the page/form key, guards, deduplicated scopes and the offered action JSON. Strong references (`nodes`)
+  cover only offered targets and their offered options (≤ 500). The reply carries `snapshot_schema: 2` and an
+  `observation_token` `{schema, epoch, generation, document_id}` instead of `marker`/`page_key`/`guards`.
+- The reply is measured in the page with `TextEncoder.encodeInto` against 262,144 serialized UTF-8 bytes. Over the
+  ceiling, the page drops its baseline and retained nodes and returns only a `snapshot_too_large` envelope with
+  counts — no actions, no token, no truncated labels. Success and overflow are each a single commit point
+  (`generation += 1`). The ceiling bounds the serialized reply, not CDP's wire message: Chrome escapes every non-ASCII
+  character, so a reply can be up to about 3× larger on the wire (2-byte scripts and emoji); a page measured at
+  87,879 bytes arrived as 155,185.
+- `fresh(token, action)` is read-only: it never installs a baseline, advances the generation or retains a node; no
+  cache, another epoch, an old generation or another document all return false. CLICK/SELECT compare the page key and
+  that action's one guard against the baseline; every other check compares the full global marker string.
+- CLICK/fill hit-testing (`target`) and the SELECT evaluation (`select`) each check the token themselves and resolve
+  their node through `reference`, which accepts only the exact action JSON the read offered; the SELECT
+  payload becomes `{action, token}` with its validation, assignment and one input/change pair still in one synchronous
+  evaluation, plus a tagged pre-input `snapshot_too_large` result.
+
+**Python and adapters.** `SnapshotTooLarge` is a `RunStopped` (`snapshot_too_large`), never a `StalePage`, so no
+recovery read or observe retry can swallow it. `Agent.command` catches it before its generic handler, stops the run
+(clearing the pending decision and text), and — after an input — keeps exactly the one logged step. MCP's final read
+reports it as a failed fresh read; a `done` run becomes `stopped` with that code, while blocked/stopped runs keep their
+codes so failure codes are unchanged. The inspector returns the stop like any `RunStopped`; `report_runs` totals it.
+Pages without a valid schema-2 token (old run files, legacy dicts) remain readable by every report but `fresh` returns
+false and `act` raises `StalePage` with zero browser calls. The progress fingerprint keeps today's projection (URL,
+text, capped actions with geometry, scroll with height, evidence) and recursively strips protocol identity
+(`observation_token`, `snapshot_schema`, `snapshot_stats`, `document_id`, `cache_epoch`), so schema-1 fingerprints are
+unchanged.
+
+**Parity with the baseline** (snapshot-preparation.json's seven cases) holds by construction: an unchanged page observed
+twice gets a new token and the same fingerprint; freshness after a mutation is false every time it is asked; geometry
+and scroll height count as progress but not as staleness; offscreen or omitted controls and title changes make global
+freshness false without counting as progress; multi-select selections are evidence and progress, never targets.
+
+**Tests.** `tests/test_snapshot_contracts.py` runs offline against a scalable fake DOM (`tests/fixtures/dense_dom.cjs`)
+evaluated by Node — the same approach as today's `select_dom.cjs` — including 250/1,000/5,000 controls, shared and
+per-row scopes, long and multibyte labels and an oversize fixture. Native lab tests compare the new freshness against
+the frozen schema-1 script (`git show c8a467c:jev_ultrafast/snapshot.js`) on the native mutation list, rerun every
+native SELECT test, and record bytes, guard builds, scope reads and references for dense pages. Known consequences:
+every observe advances the generation, so a decision becomes stale after any re-observe (READINESS must use non-installing
+reads); a real page with very long labels can now stop with `snapshot_too_large` instead of transferring megabytes.
+
+**Native evidence (Chromium 141 headless, owned lab).** Payloads, schema 2 against the frozen schema-1 script in its
+own tab, 3 warmups then 10 alternating samples, every attempt kept:
+
+| Controls | Schema 2 reply | Schema 1 reply | Schema 2 work per read |
+| --- | --- | --- | --- |
+| 250 | 38,123 B | 1.58 MB | 250 guards, 1 scope read, 250 references |
+| 1,000 | 38,046 B | 6.21 MB | same |
+| 5,000 | 37,923 B | 30.89 MB | same |
+
+Schema 1 builds a guard for every control. At 5,000 controls every schema-1 end-to-end sample hits the 5 s IPC
+timeout and only 4 of 10 in-page samples complete, and one schema-2 sample (514 ms against an 84 ms median) directly
+follows two schema-1 timeouts, likely leftover schema-1 work in the shared renderer: cite these latencies only with
+that caveat. Parity: on all 17 mutations both schemas give the same outcome for the CLICK guard, the row-scoped CLICK
+guard, the global check and SELECT, offer the same actions (the same fingerprint) and count the same changes as
+progress (`test_snapshot_freshness_parity`).
+
+**Gate review (`browser_review`, frozen at `a4ae446`): HOLD, no blockers.** The reviewer reproduced every safety,
+parity and bounds claim (56 mutants; 47 caught) and found tests missing, not code defects:
+
+| ID | Finding (severity) | Resolution |
+| --- | --- | --- |
+| S1 | Three in-page checks had no test: the offered-JSON check in `reference()` and in `select()`, and `target()`'s own token check; deleting any passed both suites (should-fix) | `test_forged_actions_with_a_current_token_never_run` (eight forgeries, one field each, with the current token: no input, no event, the baseline unchanged) and `test_a_token_that_goes_stale_after_the_freshness_check_runs_no_input` (a read between the freshness check and the hit test) |
+| N1 | The exact ceiling, the overflow reply's keys, the details filter and the malformed-read check were unpinned | `test_the_byte_ceiling_is_exact` (a reply of exactly the ceiling fits, one byte less overflows with only schema and counts) and `test_only_counts_or_a_well_formed_read_reach_python` |
+| N2 | The ceiling bounds serialized bytes, not wire bytes | Worded so above |
+| N3 | The native proof did not compare offered actions or progress across schemas | Added to `test_snapshot_freshness_parity` |
+| N4 | Two adapter paths untested: an overflow during the server's own loop, and before a TYPE_TEXT's text is generated | Two stages of `test_overflow_is_terminal_at_each_adapter`; the text model is never asked |
+| N5 | `measure_flights.py` hid the real error when measuring a revision without `SnapshotTooLarge` | It catches the class only where it exists |
+| N6, N7 | Measurement hygiene at 5,000 controls; this section named `reference` as exposed and the ledger was stale | Caveat and wording above |
+
+The reviewer's seven surviving mutants of S1 and N1 (J07, J08, J09, J11, J38, P19, P20) are each caught by these
+tests; J26 and P09 are equivalent mutants. Commands at the fixing commit, on a clean copy of it:
+`scripts/plan_tests.py SNAPSHOT --native` (10 nodes / 52 variants), the full offline suite (714) and Ruff, all
+passing; the full native suite in a fresh lab passes (31 browser-native tests plus the egress proof).
+
+**Re-review (`0e48727`): READY.** No blocker or should-fix finding remains. The reviewer re-ran every check above,
+re-measured every number this section quotes, and ran 62 mutants (the 56 of round 1 and six new ones aimed at the new
+tests' gaps: `target()` or `fresh()` bypassing `reference()`, an offered check by ID or node alone, the server loop
+overriding the stop code, TYPE_TEXT skipping its freshness read); 60 are caught and the two survivors, J26 and P09,
+are equivalent. Its one nit, this section's native count, is fixed here.
+
+### 4.3 READINESS: page readiness on an owned event source
+
+Implements `docs/executor-improvements.md` §4 v4.2 (wait for loading before a final answer) and §2 v2 (repeat a read
+that times out after a step) against the current interfaces, not the historical diff (its `wait_for_loading(stop=…)`
+skips the 90 s deadline and its signatures predate POLICY/LIMITS).
+
+**Owned event source** (`jev_ultrafast/events.py`). Browser Harness 0.1.13 keeps one 500-event queue per daemon, and
+`drain_events` empties it for every client, so the wait never uses the daemon's events and never sends
+`Network.enable` through the daemon's session. `Connection` is a private DevTools WebSocket (`websockets`' sync client,
+no proxy for this loopback endpoint, bounded calls) whose reader thread routes replies to their callers and the three
+Network events by session. `OwnedEvents` verifies the exact target with `Target.getTargetInfo` (a page, never a
+replacement or a frame), attaches its own observer session, and has `Network.enable` acknowledged on it before the
+first input runs; a failed setup detaches. It keeps four fields per event (method, request ID, type, frame; never a
+URL, header or body) in a 500-event queue whose drop is recorded as loss. A closed connection fails every caller and
+read: the run stops with `event_connection_lost`, never reads as quiet, and never reconnects inside a run. No endpoint
+appears in any message, log or run file. One connection per server process serves every tab and goal.
+
+**Browser and Agent.** The first non-WAIT input attaches the source; only inputs that returned normally move the
+last-input time, and requests seen less than 5 s before an input are carried across it (D13). Reads take in the
+source's events, and a 20 ms drain thread runs while Jev decides. Every DONE or BLOCKED answer, under any operation
+policy, waits while a tracked content request of this tab (a main-frame document, fetch, XHR or script) is in flight
+or started or ended in the last 100 ms, until 5 s after the last input: no minimum wait, every poll checks the shared
+deadline and cancellation, and each recorded wait is `[ms, capped, lost]` in `loading_waits`. The wait and the drain
+never evaluate the snapshot (an observe would advance the schema-2 generation and make every gated DONE stale), and the
+server's final read takes in no events. After an executed step, WAIT and scroll included, an observation
+`TimeoutError` is read again at most twice (`repeated_reads`), each repeat checked against the stop first and counted
+only once started; nothing else is retried, and no repeat moves the last-input time. A valid new goal resets tracking
+after both validations; an invalid policy changes nothing. The two-WAIT handoff is unchanged: WAIT is not an input.
+
+**Decision needed (Chrome's per-connection approval).** The owned source is a second DevTools client. With an explicit
+endpoint (`BU_CDP_WS`/`BU_CDP_URL`, daemon kind `cdp`, as in the lab) that costs nothing. With your own Chrome (daemon
+kind `local`), Chrome 144+ asks "Allow remote debugging?" for every new connection, so a connection per goal would prompt
+at the first input of every run, inside its 90 s budget. Options: (a) one owned connection per server process, opened at
+browser setup and reused by every goal (one extra approval per `jev-mcp` start); (b) the gate only for explicit
+endpoints, with today's behaviour on `local`. Never fall back to the daemon's destructive drain. **Built default until
+you choose: (b), with (a) behind `JEV_LOADING_GATE=1`** (`events.gate_mode`); `JEV_LOADING_GATE=0` turns the wait off
+everywhere. Under (a) the connection opens at browser setup, or at a new goal's setup if it closed, bounded at 30 s like
+the daemon's approval, so the question never counts against a run. Chrome's approval prompt itself cannot be exercised
+in the cloud (headless Chromium with a debugging port asks nothing); it needs one check on your Mac.
+
+**Tests.** `tests/test_readiness_contracts.py`: a real `Browser` on a fake CDP with a `FakeEvents` source of the tab's
+own and a shared fake clock; the composition cases add the actual schema-2 snapshot adapter in Node. It holds §2.5's
+cases 1, 2, 4 and 5, §4.6's 27 cases (12, 25 and 26 replaced as the map specifies) and the plan's composition nodes;
+four inherited nodes live in `test_agent.py`, `test_mcp_server.py` and `test_report_runs.py`. The real `Connection` and
+`OwnedEvents` run against a scripted DevTools socket whose calls are checked against the installed `websockets`
+signature: a wrong target or a frame target, distinct observer sessions, enable before any input, another session's
+600 events neither delivered nor counted, exactly 500 events no loss and the 501st loss, setup timeout and close during
+setup (cleaned up at once), a disconnect with nothing pending, one connection reopened once after it closed, and no
+endpoint in errors or logs. The case-to-node record is in [readiness-test-map.md](readiness-test-map.md#implementation-record).
+Each of 48 code mutants (gate rules, carry-over, loss, stop checks, ordering, setup and approval bounds, event
+routing, the server's final read) fails at least one of these tests.
+
+**Native, in the owned lab** (`tests/test_browser_native.py`, fixture `readiness.html`): the plan's
+`test_busy_page_and_loading_gate_compose_without_repeated_input` drives `mcp_server.start_run` with a scripted Jev
+over a page busy 7 s after its Search, then a details request: done, `repeated_reads` 1, loading waits
+`[870, False, False]` and `[0, False, False]`, one stale DONE dropped and recovered, the separately timed final read
+(48 ms) shows the details, the fixture server counts one submission and the page one click per button. §2's
+acceptance: 5 of 5 busy-page runs done with one repeated read, one submission and one click each (about 7.05 s); the
+dialog run stops after two repeats with the dialog dismissed and its one step recorded. §4's acceptance on real
+Network events: an answer before the request waits 0 ms; one while it loads waits until the page shows it (1,600 ms,
+uncapped); a request that never ends caps 5 s after the input (4,980 ms); a cross-site iframe, a real separate
+out-of-process target whose document request arrives as the iframe's own frame, does not hold the wait (0 ms); a
+main-frame navigation, whose document carries the tab's target ID, does (1,163 ms); a scroll during an earlier request
+keeps it (1,276 ms). The iframe uses a second fixture site, `jev-frame.test` at the fixture's port, which the proxy
+forwards to the same owned server and nothing resolves; `localhost`, other ports and other names stay denied, and the
+egress proof (canary 0 connections) passes with it. `scripts/check_guards.py` adds two live lines (25 checks).
+
+New run-file fields (`loading_waits`, `repeated_reads`) are totalled by `report_runs`; result text for Claude is
+unchanged. Not performed: §4.6's live-site acceptance (H8c's gate arm on Google Flights, DuckDuckGo, crates.io and
+YouTube) and H5's arXiv repeats, which need live sites and paid models; they remain validation limits, not claims.
+
+### 4.4 RELEASE
+
+1. **RELEASE-1:** reconcile README, `docs/claude-code-integration.md`, `docs/failure-review.md`,
+   `docs/executor-improvements.md` statuses and examples with the shipped API; label old trials historical.
+2. **RELEASE-2:** Ruff, full offline and native suites at one commit, both JS checks, `uv build`,
+   `scripts/wheel_smoke.py`; an independent implementation review and a separate premortem.
+3. **RELEASE-3:** finish `scripts/migrate_review_storage.py`: writer detection and quiescence (dispatch lock, live
+   attempts), a verified backup (hash under locks, read back), state migration, a dry-run inventory, refusal of a missing
+   store, and a compatibility export the baseline code can read (notes list; v2 acknowledgments as legacy digests so a
+   rollback does not requeue everything). Rehearse the runbook end to end on disposable state with fake launchers.
+
+## 5. Checkpoint and how to resume (2026-10-04)
+
+Work stopped here because the session's credit ran low. Everything is committed and pushed on
+`claude/busy-edison-lx8bhh` (draft PR #2). Nothing below has been started beyond what it says.
+
+**State at the checkpoint.**
+
+- **GATE-REVIEWS** and **GATE-SNAPSHOT** are done, with their independent reviews READY (§4.1, §4.2).
+- **READINESS** is implemented at `952ef93`: offline, native and mutation evidence is in §4.3. Two independent
+  reviews of that commit were started (`execution_review`: the gate and reread semantics, concurrency, stop handling and
+  test strength; `browser_review`: the owned connection, the lab's second fixture site and egress, the native evidence
+  and every doc claim). Both were stopped before reporting, to save credit. No finding from them is known.
+- **RELEASE-3** is drafted at `f476832`, ahead of RELEASE-1 and RELEASE-2. It holds the storage tool, its 15 tests, the
+  baseline frozen from `3efae4f`, the rehearsal and the runbook (§4.4, [activation-runbook.md](activation-runbook.md)).
+  It has had no independent review.
+- A read-only audit of the docs against the code for RELEASE-1 was also started and stopped before reporting.
+
+**Resume in this order.**
+
+1. **GATE-READINESS:** re-run the two independent reviews on the readiness commit, scoped as above. Fix every blocker
+   and should-fix with a test that fails before the fix, record the verdicts in §4.3, and mark the gate done.
+2. **RELEASE-1:** reconcile README and the docs with the shipped API, statuses and limits (the plan's RELEASE-1 Pass
+   line); re-run the docs audit first.
+3. **RELEASE-2:** run every check in AGENTS.md at one commit, plus `scripts/plan_tests.py` for every stage with
+   `--native`, `scripts/validation_lab.py run`, `scripts/check_guards.py` in a lab and `scripts/wheel_smoke.py`. Then an
+   independent implementation review of the final diff, and a separate premortem with fault injection.
+4. **RELEASE-3:** review the drafted tooling, re-run `scripts/rehearse_activation.py` at the release commit, and record
+   its evidence.
+5. **GATE-RELEASE:** the change summary, the migration notes, every review and the explicit unrun checks.
+
+**Open decision for the user.** The loading wait's default with your own Chrome (§4.3): built as on with an explicit
+endpoint, and on with your own Chrome only behind `JEV_LOADING_GATE=1`.
+
+**Not verifiable in this container, still open.**
+
+- Chrome's "Allow remote debugging?" prompt for the loading wait's connection.
+- Writer detection on macOS (`ps`/`lsof`).
+- The live-site acceptance of §4.6 (H8c's gate arm) and H5 on arXiv.
+- Activating the real store, which its owner does with the runbook after GATE-RELEASE.
