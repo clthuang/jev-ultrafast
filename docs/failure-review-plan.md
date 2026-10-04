@@ -9,8 +9,6 @@ records the paid phase.
 **Review of this plan:** reviewed on 2026-09-26 by one independent reviewer and by calvin, over both halves; then
 broken into dependent tasks, and the breakdown reviewed independently. See "Review of this plan" at the end.
 
-**Status (2026-09-27):** in progress. Nothing in this plan is committed. Each task's status is in the task graph.
-
 **How to use this plan:**
 
 - **Order:** the task graph below is the source of truth.

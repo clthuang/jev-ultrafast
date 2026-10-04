@@ -33,4 +33,4 @@ No source edits or test runs performed.
 
 - This note preserves the PRIVACY-1 matrix from executor-improvements-plan tasks 3.1, 3.2, 3.5 and 3.6 (F1/F6/F7/F8). F2 remains the atomic receipt transaction in REVIEWS-4, not a delete-ack workaround.
 - Source ownership remains with the current LIMITS implementer until root explicitly hands off. Saving this file is evidence-only, not an implementation change.
-- Later schemas, crash cases, dispatch accounting, and preflight behavior are recorded in `review-storage-implementation-notes.md` in the same evidence directory.
+- Later schemas, crash cases, dispatch accounting, and preflight behavior are recorded in [review-storage-notes.md](review-storage-notes.md).

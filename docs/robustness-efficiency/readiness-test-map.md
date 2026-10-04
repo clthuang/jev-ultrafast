@@ -5,9 +5,9 @@ Status: implementation preparation only. The nodes below are proposed exact test
 ## Evidence and precedence
 
 - Current design: `docs/executor-improvements.md` §2.5 (345–395), §4.4 (1514–1669), §4.6 (1730–1902).
-- The original 24 executable loading tests and fixture are in `artifacts/experiments/2026-09-24/h8-network-settle/design-check/v4/design-v41.diff`, lines 269–637. They are historical test source, not current implementation evidence.
+- The original 24 executable loading tests and fixture are in [readiness-design-v41.diff](readiness-design-v41.diff), lines 269–637 (originally `artifacts/experiments/2026-09-24/h8-network-settle/design-check/v4/design-v41.diff`). They are historical test source, not current implementation evidence.
 - Original cases 25–27 are specified in `docs/executor-improvements-plan.md:419–450`.
-- Current stage contracts: `docs/robustness-efficiency-implementation-plan.md:543–587`; explicit exceptions: this evidence directory's `implementation-clarifications.md`, items 3–5.
+- Current stage contracts: `docs/robustness-efficiency-implementation-plan.md:543–587`; explicit exceptions: [implementation-clarifications.md](implementation-clarifications.md), items 3–5.
 - Browser/Agent integration was read from the captured `baseline/jev_ultrafast/{browser,agent}.py`; POLICY is concurrently changing candidate Agent interfaces. Use the final POLICY/EXECUTION interfaces when implementing these tests.
 
 Only three inherited adaptations are authorized here: valid new goals reset loading state (case 25), stop checks beat a loaded terminal answer (case 26), and private event ownership replaces the shared destructive daemon drain. Preserve all other behavioral assertions. A disconnected private stream gets a clear event-connection error instead of the obsolete shared-daemon empty-reply error text.

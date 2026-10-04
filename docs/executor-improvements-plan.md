@@ -28,8 +28,10 @@
     | F10 | the lesson walk's loop guard is untested | 4.4 |
     | F11 | the hyphenated look-alike is untested | 4.2 |
 
-**Status:** not started (2026-09-29). This plan replaces the H5-only plan of 2026-09-24. It keeps that plan's tasks,
-checks, lab safety rules and calvin answers where they still apply (§"Review of this plan").
+**Status:** superseded for scheduling on 2026-10-03 by `docs/robustness-efficiency-implementation-plan.md`, which runs
+this plan's follow-ups F1–F11 (stages PRIVACY-1 and REVIEWS-1…7) and its §2/§4 readiness work (READINESS-1…3) against
+the newer interfaces. The task details, checks and lab safety rules below remain that plan's reference. Before then:
+not started (2026-09-29); this plan replaced the H5-only plan of 2026-09-24.
 
 **How to use this plan:**
 
