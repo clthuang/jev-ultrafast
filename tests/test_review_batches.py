@@ -142,12 +142,16 @@ def recovery():
               outcome=[{'passed': True, 'by': 'user', 'evidence': 'Verified', 'at': '2026-10-03T11:00:00'}])
 
 
+def batch_id_of(err):
+    [line] = [line for line in err.splitlines() if line.startswith('batch: ')]
+    return line.removeprefix('batch: ')
+
+
 def test_queue_prints_exact_saved_bytes(capsys):
     write_run()
     assert review_runs.main(['queue']) == 0
     output = capsys.readouterr()
-    batch_id = output.err.strip().split()[-1]
-    batch = review_runs.load_batch(batch_id)
+    batch = review_runs.load_batch(batch_id_of(output.err))
     assert output.out.encode('utf-8') == batch['sent_text'].encode('utf-8')
     assert batch['sent_sha256'] == __import__('hashlib').sha256(output.out.encode()).hexdigest()
 
@@ -1028,3 +1032,28 @@ def test_failure_after_commit_reports_recovery_pending_never_not_applied(fake_pa
     else:
         assert review_runs.main(['recover']) == 1
         assert 'receipt is retained' in capsys.readouterr().out and pending_receipt() == receipt
+
+
+def test_queue_shows_input_membership_and_deferred_items(monkeypatch, capsys):
+    write_run(RUN_A, history=[{'step': number, 'action': '巨大' * 100, 'operation': 'CLICK'} for number in range(100)])
+    write_run(RUN_B)
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_BYTES', 1500)
+    assert review_runs.main(['queue']) == 0
+    err = capsys.readouterr().err
+    batch = review_runs.load_batch(batch_id_of(err))
+    assert f"input: run {RUN_B} @{batch['runs'][RUN_B][:8]}" in err.splitlines()
+    assert f"deferred: run {RUN_A} (over the batch's byte limit)" in err.splitlines()
+    assert 'Nothing' not in err
+
+
+def test_queue_holding_only_oversized_items_says_so(monkeypatch, capsys):
+    path, problems = apply_batch(review_runs.prepare_batch())  # the seed notes, reviewed before
+    assert path.exists() and not problems
+    write_run(RUN_A, history=[{'step': number, 'action': '巨大' * 100, 'operation': 'CLICK'} for number in range(100)])
+    monkeypatch.setattr(review_runs, 'MAX_BATCH_BYTES', 1500)
+    assert review_runs.main(['queue']) == 0
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert f"deferred: run {RUN_A} (over the batch's byte limit)" in output.err.splitlines()
+    assert 'Nothing fits a batch; the deferred items need a manual look.' in output.err
+    assert 'Nothing is queued.' not in output.err

@@ -369,6 +369,10 @@ def review_lines(reviews, kept, exclude, left_out):
         hidden += len(items) - len(unnamed)
         return unnamed
 
+    def members(entries):
+        """A digest's members, each its kind, ID and version prefix, leaving out and counting excluded ones."""
+        return ", ".join(shown(entries)) or "none"
+
     today = date.today()
     waiting = [note for note in kept if not note["approved"] and not note["retired"] and active(note, today)]
     details = shown([f"  {note['id']}: {one_line(note['detail'])}" for note in waiting if note["detail"]])
@@ -393,7 +397,15 @@ def review_lines(reviews, kept, exclude, left_out):
         items = [decision_line(decision) for decision in digest.get("decisions", [])]
         proposals = [f"  {fields(item)}" for item in digest.get("proposals", [])]
         flags = [f"  {fields(item)}" for item in digest.get("flags", [])]
-        block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
+        if digest.get("legacy"):
+            block += under_heading(f"{path}:", shown(items)) or [f"{path}: no decisions to show"]
+        else:
+            # What was sent and what it acknowledged are separate records: only acknowledgment suppresses work.
+            sent = [f"{item['kind'][:-1]} {item['id']}@{item['version'][:8]}" for item in digest["input_items"]]
+            acknowledged = [f"{kind[:-1]} {key}@{version[:8]}" for kind in ("runs", "notes")
+                            for key, version in digest["acknowledged"][kind].items()]
+            block += [f"{path}:", f"  input: {members(sent)}", f"  acknowledged: {members(acknowledged)}",
+                      *(shown(items) or ["  no decisions to show"])]
         latest = path, proposals, flags
     if latest:
         # Delegated decision P19 (docs/failure-review-plan.md): open proposals and label flags are the latest

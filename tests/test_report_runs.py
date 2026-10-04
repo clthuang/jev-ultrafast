@@ -479,10 +479,25 @@ def store_review(path, record):
 
 def test_mixed_legacy_and_v2_reporting(tmp_path):
     store_review(tmp_path / '20260927-100000.json', {'decisions': [], 'flags': [], 'proposals': [], 'cost': 0.2})
-    store_review(tmp_path / ('a' * 32 + '.json'), v2_record('a' * 32))
-    text = '\n'.join(report_runs.review_lines(tmp_path, [], set(), set()))
+    sent = {'20261003-100000-0001': 'b' * 64, '20261003-100100-0002': 'c' * 64, '20261003-100200-0003': 'e' * 64}
+    record = v2_record('a' * 32)
+    record['input_items'] = [{'kind': 'runs', 'id': key, 'version': version, 'reasons': ['failed']}
+                             for key, version in sent.items()]
+    record['input_items'].append({'kind': 'notes', 'id': 'example.com-1', 'version': 'd' * 64,
+                                  'reasons': ['new']})
+    acknowledged = dict(list(sent.items())[:2])
+    record['acknowledged'] = {'runs': acknowledged, 'notes': {}}  # sent is not acknowledged
+    path = tmp_path / ('a' * 32 + '.json')
+    store_review(path, record)
+    lines = report_runs.review_lines(tmp_path, [], {'20261003-100100-0002'}, set())
+    text = '\n'.join(lines)
     assert 'reviews: 2, 0 failed, cost $0.3000' in text
-    assert review_records.acknowledged(tmp_path) == {'runs': {}, 'notes': {}}
+    assert (f'{path}:\n  input: run 20261003-100000-0001@bbbbbbbb, run 20261003-100200-0003@eeeeeeee, '
+            'note example.com-1@dddddddd\n  acknowledged: run 20261003-100000-0001@bbbbbbbb\n'
+            '  no decisions to show') in text
+    assert 'review items and note details left out for exclusions: 2' in text  # the excluded run, twice
+    assert review_records.acknowledged(tmp_path) == {'runs': {key: {value} for key, value in acknowledged.items()},
+                                                     'notes': {}}
 
 
 def test_running_attempt_is_not_failed(tmp_path):

@@ -489,6 +489,15 @@ def summaries(queue):
 MAX_BATCH_RUNS = 25
 MAX_BATCH_NOTES = 5
 MAX_BATCH_BYTES = 65_536
+DEFERRED_REASONS = {"item_cap": "over the batch's item limit", "byte_cap": "over the batch's byte limit"}
+
+
+def membership_lines(batch):
+    """What a batch sends and what it left for a later batch: IDs, version prefixes and reasons, never content."""
+    lines = [f"input: {item['kind'][:-1]} {item['id']} @{item['version'][:8]}" for item in batch["items"]]
+    lines += [f"deferred: {item['kind'][:-1]} {item['id']} ({DEFERRED_REASONS[item['reason']]})"
+              for item in batch["deferred"]]
+    return lines
 
 
 class Superseded(ValueError):
@@ -1383,6 +1392,8 @@ def paid_command(kind, since=None):
                         state.update(last_start=started, next_due=int(now + REVIEW_EVERY_HOURS * 3600), running=None)
                         site_notes.write_review_state(state)
                         print(f"{started}: nothing eligible for a paid review")
+                        for line in membership_lines(batch):
+                            print(line)
                         return 0
                 attempt = claim_attempt(state, kind, batch, now)
             return launch_attempt(attempt, batch)
@@ -1638,8 +1649,11 @@ def main(argv=None):
         text = batch["sent_text"]
         print(text, end="")
         print(f"batch: {batch['batch_id']}", file=sys.stderr)
+        for line in membership_lines(batch):
+            print(line, file=sys.stderr)
         if not text:
-            print("Nothing is queued.", file=sys.stderr)
+            print("Nothing fits a batch; the deferred items need a manual look." if batch["deferred"]
+                  else "Nothing is queued.", file=sys.stderr)
         return 0
     if args.command == "apply":
         return apply_command(args.batch)
